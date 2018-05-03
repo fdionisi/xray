@@ -6,7 +6,7 @@ use serde_json;
 use std::cell::RefCell;
 use std::rc::Rc;
 use window::{View, WeakViewHandle, Window};
-use workspace::{self};
+use workspace;
 use ForegroundExecutor;
 use IntoShared;
 use UserId;

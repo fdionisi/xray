@@ -29,7 +29,7 @@ pub trait Workspace {
 }
 
 pub struct LocalWorkspace {
-    next_user_id: usize,
+    next_user_id: UserId,
     user_id: UserId,
     discussion: Rc<RefCell<Discussion>>,
     project: Rc<RefCell<LocalProject>>,
