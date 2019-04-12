@@ -11,8 +11,8 @@ const CURSOR_BLINK_RESUME_DELAY = 300;
 const CURSOR_BLINK_PERIOD = 800;
 const MOUSE_DRAG_AUTOSCROLL_MARGIN = 40;
 
-function scaleMouseDragAutoscrollDelta (delta) {
-  return Math.pow(delta / 3, 3) / 280
+function scaleMouseDragAutoscrollDelta(delta) {
+  return Math.pow(delta / 3, 3) / 280;
 }
 
 const Root = styled("div", {
@@ -46,6 +46,7 @@ class TextEditor extends React.Component {
     this.handleMouseMove = this.handleMouseMove.bind(this);
     this.handleMouseUp = this.handleMouseUp.bind(this);
     this.handleMouseDown = this.handleMouseDown.bind(this);
+    this.handleMouseMove = this.handleMouseMove.bind(this);
     this.handleMouseWheel = this.handleMouseWheel.bind(this);
     this.handleKeyDown = this.handleKeyDown.bind(this);
     this.pauseCursorBlinking = this.pauseCursorBlinking.bind(this);
@@ -81,20 +82,7 @@ class TextEditor extends React.Component {
       passive: true
     });
 
-    let lastMousemoveEvent
-    const animationFrameLoop = () => {
-      window.requestAnimationFrame(() => {
-        if (this.state.mouseDown) {
-          this.handleMouseMove(lastMousemoveEvent)
-          animationFrameLoop()
-        }
-      })
-    }
-
-    document.addEventListener("mousemove", event => {
-      lastMousemoveEvent = event;
-      animationFrameLoop()
-    }, {
+    document.addEventListener("mousemove", this.handleMouseMove, {
       passive: true
     });
     document.addEventListener("mouseup", this.handleMouseUp, {
@@ -108,6 +96,16 @@ class TextEditor extends React.Component {
     this.stopCursorBlinking();
     const element = ReactDOM.findDOMNode(this);
     element.removeEventListener("wheel", this.handleMouseWheel, {
+      passive: true
+    });
+    element.removeEventListener("mousedown", this.handleMouseDown, {
+      passive: true
+    });
+
+    document.removeEventListener("mousemove", this.handleMouseMove, {
+      passive: true
+    });
+    document.removeEventListener("mouseup", this.handleMouseUp, {
       passive: true
     });
     this.resizeObserver.disconnect();
@@ -237,7 +235,7 @@ class TextEditor extends React.Component {
     );
   }
 
-  getPositionFromMouseEvent({ clientX, clientY}) {
+  getPositionFromMouseEvent({ clientX, clientY }) {
     const { scroll_top, line_height, first_visible_row, lines } = this.props;
     const { scrollLeft } = this.state;
     const targetX =
@@ -258,67 +256,78 @@ class TextEditor extends React.Component {
           break;
         }
       }
-      return { row, column }
+      return { row, column };
     }
   }
 
-  autoscrollOnMouseDrag ({clientX, clientY}) {
-    const top = 0 + MOUSE_DRAG_AUTOSCROLL_MARGIN
-    const bottom = this.props.height - MOUSE_DRAG_AUTOSCROLL_MARGIN
-    const left = 0 + MOUSE_DRAG_AUTOSCROLL_MARGIN
-    const right = this.props.width - MOUSE_DRAG_AUTOSCROLL_MARGIN
+  autoscrollOnMouseDrag({ clientX, clientY }) {
+    const top = 0 + MOUSE_DRAG_AUTOSCROLL_MARGIN;
+    const bottom = this.props.height - MOUSE_DRAG_AUTOSCROLL_MARGIN;
+    const left = 0 + MOUSE_DRAG_AUTOSCROLL_MARGIN;
+    const right = this.props.width - MOUSE_DRAG_AUTOSCROLL_MARGIN;
 
-    let yDelta, yDirection
+    let yDelta, yDirection;
     if (clientY < top) {
-      yDelta = top - clientY
-      yDirection = -1
+      yDelta = top - clientY;
+      yDirection = -1;
     } else if (clientY > bottom) {
-      yDelta = clientY - bottom
-      yDirection = 1
+      yDelta = clientY - bottom;
+      yDirection = 1;
     }
 
-    let xDelta, xDirection
+    let xDelta, xDirection;
     if (clientX < left) {
-      xDelta = left - clientX
-      xDirection = -1
+      xDelta = left - clientX;
+      xDirection = -1;
     } else if (clientX > right) {
-      xDelta = clientX - right
-      xDirection = 1
+      xDelta = clientX - right;
+      xDirection = 1;
     }
 
     if (yDelta != null) {
-      const scaledDelta = scaleMouseDragAutoscrollDelta(yDelta) * yDirection
-      this.updateScrollTop(scaledDelta)
+      const scaledDelta = scaleMouseDragAutoscrollDelta(yDelta) * yDirection;
+      this.updateScrollTop(scaledDelta);
     }
 
     if (xDelta != null) {
-      const scaledDelta = scaleMouseDragAutoscrollDelta(xDelta) * xDirection
-      this.setScrollLeft(this.getScrollLeft() + scaledDelta)
+      const scaledDelta = scaleMouseDragAutoscrollDelta(xDelta) * xDirection;
+      this.setScrollLeft(this.getScrollLeft() + scaledDelta);
     }
   }
 
   handleMouseMove(event) {
-    if (this.canUseTextPlane() && this.state.mouseDown) {
-      const boundedPositions = {
-        clientX: Math.min(Math.max(event.clientX, 0), this.props.width),
-        clientY: Math.min(Math.max(event.clientY, 0), this.props.height),
-      }
-      this.autoscrollOnMouseDrag(event)
-      const pos = this.getPositionFromMouseEvent(boundedPositions);
-      if (pos) {
-        this.props.dispatch(Object.assign({
-          type: "SelectTo",
-        }, pos));
-      }
+    if (!this.state.mouseDown) {
+      return;
     }
+
+    window.requestAnimationFrame(() => {
+      if (this.canUseTextPlane() && this.state.mouseDown) {
+        const boundedPositions = {
+          clientX: Math.min(Math.max(event.clientX, 0), this.props.width),
+          clientY: Math.min(Math.max(event.clientY, 0), this.props.height)
+        };
+        this.autoscrollOnMouseDrag(event);
+        const pos = this.getPositionFromMouseEvent(boundedPositions);
+        if (pos) {
+          this.props.dispatch(
+            Object.assign(
+              {
+                type: "SelectTo"
+              },
+              pos
+            )
+          );
+        }
+      }
+    });
   }
 
   handleMouseUp() {
-    this.setState({mouseDown: false})
+    this.setState({ mouseDown: false });
   }
 
   handleMouseDown(event) {
-    this.setState({mouseDown: true})
+    this.setState({ mouseDown: true });
     if (this.canUseTextPlane()) {
       this.handleClick(event);
       switch (event.detail) {
@@ -337,14 +346,24 @@ class TextEditor extends React.Component {
     const pos = this.getPositionFromMouseEvent(event);
     if (pos) {
       if (event.shiftKey) {
-        this.props.dispatch(Object.assign({
-          type: "SelectTo"
-        }, pos));
+        this.props.dispatch(
+          Object.assign(
+            {
+              type: "SelectTo"
+            },
+            pos
+          )
+        );
       } else {
-        this.props.dispatch(Object.assign({
-          type: "SetCursorPosition",
-          autoscroll: false
-        }, pos));
+        this.props.dispatch(
+          Object.assign(
+            {
+              type: "SetCursorPosition",
+              autoscroll: false
+            },
+            pos
+          )
+        );
       }
     }
   }
