@@ -1904,6 +1904,23 @@ mod tests {
     }
 
     #[test]
+    fn test_longest_line_in_frame() {
+        let buffer = Rc::new(RefCell::new(Buffer::new(0)));
+        buffer
+            .borrow_mut()
+            .edit(&[0..0], "1\n1\n1\n1\n11\n1\n1");
+        let line_height = 6.0;
+
+        let mut editor = BufferView::new(buffer.clone(), 0, None);
+        editor
+            .set_height(2.0 * line_height)
+            .set_line_height(line_height)
+            .set_scroll_top(2.0 * line_height);
+        
+        let _ = editor.render();
+    }
+
+    #[test]
     fn test_render_past_last_line() {
         let line_height = 4.0;
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
