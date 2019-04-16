@@ -293,6 +293,7 @@ impl BufferView {
 
     pub fn add_selection(&mut self, start: Point, end: Point) {
         debug_assert!(start <= end); // TODO: Reverse selection if end < start
+
         let start = self.buffer.borrow().clip_point(start);
         let end = self.buffer.borrow().clip_point(end);
         self.buffer
