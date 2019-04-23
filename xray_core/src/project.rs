@@ -67,7 +67,7 @@ pub struct ProjectService {
     tree_services: HashMap<TreeId, rpc::server::ServiceHandle>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct RpcState {
     trees: HashMap<TreeId, rpc::ServiceId>,
 }
@@ -878,7 +878,8 @@ mod tests {
         let remote_project = RemoteProject::new(
             handle,
             rpc::tests::connect(&mut reactor, ProjectService::new(local_project.clone())),
-        ).unwrap();
+        )
+        .unwrap();
 
         let (mut local_search, local_observer) =
             local_project.borrow().search_paths("bar", 10, true);

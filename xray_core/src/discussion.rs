@@ -24,17 +24,17 @@ pub struct Discussion {
     client: Option<client::Service<DiscussionService>>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message {
     text: String,
     anchor: Option<workspace::Anchor>,
     user_id: UserId,
 }
 
-pub struct DiscussionView<T: DiscussionViewDelegate> {
+pub struct DiscussionView {
     discussion: Rc<RefCell<Discussion>>,
     updates: Box<Stream<Item = (), Error = ()>>,
-    delegate: WeakViewHandle<T>,
+    delegate: WeakViewHandle<DiscussionViewDelegate>,
 }
 
 #[derive(Deserialize)]
@@ -125,7 +125,7 @@ impl Discussion {
     }
 }
 
-impl<T: DiscussionViewDelegate> View for DiscussionView<T> {
+impl View for DiscussionView {
     fn component_name(&self) -> &'static str {
         "Discussion"
     }
@@ -162,8 +162,11 @@ impl<T: DiscussionViewDelegate> View for DiscussionView<T> {
     }
 }
 
-impl<T: DiscussionViewDelegate> DiscussionView<T> {
-    pub fn new(discussion: Rc<RefCell<Discussion>>, delegate: WeakViewHandle<T>) -> Self {
+impl DiscussionView {
+    pub fn new(
+        discussion: Rc<RefCell<Discussion>>,
+        delegate: WeakViewHandle<DiscussionViewDelegate>,
+    ) -> Self {
         let updates = discussion.borrow().updates();
         Self {
             delegate,
@@ -173,7 +176,7 @@ impl<T: DiscussionViewDelegate> DiscussionView<T> {
     }
 }
 
-impl<T: DiscussionViewDelegate> Stream for DiscussionView<T> {
+impl Stream for DiscussionView {
     type Item = ();
     type Error = ();
 

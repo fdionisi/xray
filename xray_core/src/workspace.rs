@@ -45,7 +45,7 @@ pub struct WorkspaceService {
     workspace: Rc<RefCell<LocalWorkspace>>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ServiceState {
     user_id: UserId,
     project: rpc::ServiceId,
@@ -64,7 +64,7 @@ pub struct WorkspaceView {
     window_handle: Option<WeakWindowHandle>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Anchor {
     buffer_id: BufferId,
     range: Range<buffer::Anchor>,

@@ -106,7 +106,7 @@ struct SelectionSet {
     version: SelectionSetVersion,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SelectionSetState {
     user_id: UserId,
     selections: Vec<Selection>,
@@ -272,7 +272,7 @@ pub mod rpc {
     use std::rc::Rc;
     use std::sync::Arc;
 
-    #[derive(Serialize, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize)]
     pub struct State {
         pub(super) id: BufferId,
         pub(super) replica_id: ReplicaId,
@@ -312,7 +312,7 @@ pub mod rpc {
         },
     }
 
-    #[derive(Serialize, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize)]
     pub(super) struct Fragment {
         pub id: FragmentId,
         pub insertion_id: EditId,
@@ -364,7 +364,8 @@ pub mod rpc {
 
         fn poll_outgoing_selection_updates(&mut self) -> Async<Option<Update>> {
             loop {
-                match self.buffer_updates
+                match self
+                    .buffer_updates
                     .poll()
                     .expect("Polling a NotifyCellObserver cannot produce an error")
                 {
@@ -500,12 +501,14 @@ pub mod rpc {
                         .remove_remote_selection_set(self.replica_id, set_id);
                     None
                 }
-                Request::Save => Some(Box::new(self.buffer.borrow().save().then(|result| {
-                    match result {
-                        Ok(_) => Ok(Response::Saved),
-                        Err(error) => Ok(Response::Error(error)),
-                    }
-                }))),
+                Request::Save => {
+                    Some(Box::new(self.buffer.borrow().save().then(
+                        |result| match result {
+                            Ok(_) => Ok(Response::Saved),
+                            Err(error) => Ok(Response::Error(error)),
+                        },
+                    )))
+                }
             }
         }
     }
@@ -638,7 +641,8 @@ impl Buffer {
             selections: selection_sets,
             next_local_selection_set_id: 0,
             file: None,
-        }.into_shared();
+        }
+        .into_shared();
 
         let buffer_weak = Rc::downgrade(&buffer);
         foreground
@@ -893,7 +897,8 @@ impl Buffer {
         F: FnOnce(&Buffer, &mut Vec<Selection>),
     {
         let id = (self.replica_id, set_id);
-        let mut set = self.selections
+        let mut set = self
+            .selections
             .remove(&id)
             .ok_or(Error::SelectionSetNotFound)?;
         f(self, &mut set.selections);
@@ -913,11 +918,15 @@ impl Buffer {
             let mut old_selections = selections.drain(..);
             if let Some(mut prev_selection) = old_selections.next() {
                 for selection in old_selections {
-                    if self.cmp_anchors(&prev_selection.end, &selection.start)
-                        .unwrap() >= Ordering::Equal
+                    if self
+                        .cmp_anchors(&prev_selection.end, &selection.start)
+                        .unwrap()
+                        >= Ordering::Equal
                     {
-                        if self.cmp_anchors(&selection.end, &prev_selection.end)
-                            .unwrap() > Ordering::Equal
+                        if self
+                            .cmp_anchors(&selection.end, &prev_selection.end)
+                            .unwrap()
+                            > Ordering::Equal
                         {
                             prev_selection.end = selection.end;
                         }
@@ -1103,7 +1112,8 @@ impl Buffer {
         set_id: SelectionSetId,
         state: SelectionSetState,
     ) {
-        let set = self.selections
+        let set = self
+            .selections
             .entry((replica_id, set_id))
             .or_insert(SelectionSet {
                 user_id: state.user_id,
@@ -1127,7 +1137,8 @@ impl Buffer {
     }
 
     fn resolve_fragment_id(&self, edit_id: EditId, offset: usize) -> Result<FragmentId, Error> {
-        let split_tree = self.insertion_splits
+        let split_tree = self
+            .insertion_splits
             .get(&edit_id)
             .ok_or(Error::InvalidOperation)?;
         let mut cursor = split_tree.cursor();
@@ -1182,7 +1193,8 @@ impl Buffer {
             let mut fragment_start = cursor.start::<CharacterCount>().0;
             let mut fragment_end = fragment_start + fragment.len();
 
-            let old_split_tree = self.insertion_splits
+            let old_split_tree = self
+                .insertion_splits
                 .remove(&fragment.insertion.id)
                 .unwrap();
             let mut splits_cursor = old_split_tree.cursor();
@@ -1465,7 +1477,8 @@ impl Buffer {
                 None
             };
 
-            let old_split_tree = self.insertion_splits
+            let old_split_tree = self
+                .insertion_splits
                 .remove(&fragment.insertion.id)
                 .unwrap();
             let mut cursor = old_split_tree.cursor();
@@ -1665,7 +1678,8 @@ impl Buffer {
                         &AnchorBias::Right => SeekBias::Right,
                     };
 
-                    let splits = self.insertion_splits
+                    let splits = self
+                        .insertion_splits
                         .get(&insertion_id)
                         .ok_or(Error::InvalidAnchor)?;
                     let mut splits_cursor = splits.cursor();
@@ -2131,7 +2145,8 @@ impl Text {
                 }
                 Ordering::Equal
             }
-        }).ok_or(Error::OffsetOutOfRange)?;
+        })
+        .ok_or(Error::OffsetOutOfRange)?;
 
         self.search(|probe| {
             if target_range.end >= probe.offset_range.start
@@ -2165,7 +2180,8 @@ impl Text {
                 }
                 Ordering::Equal
             }
-        }).ok_or(Error::OffsetOutOfRange)?;
+        })
+        .ok_or(Error::OffsetOutOfRange)?;
 
         Ok((longest_row, longest_row_len))
     }
@@ -2415,10 +2431,8 @@ impl Fragment {
     fn point_for_offset(&self, offset: usize) -> Result<Point, Error> {
         let text = &self.insertion.text;
         let offset_in_insertion = self.start_offset + offset;
-        Ok(
-            text.point_for_offset(offset_in_insertion)?
-                - &text.point_for_offset(self.start_offset)?,
-        )
+        Ok(text.point_for_offset(offset_in_insertion)?
+            - &text.point_for_offset(self.start_offset)?)
     }
 
     fn offset_for_point(&self, point: Point) -> Result<usize, Error> {
@@ -2433,11 +2447,13 @@ impl tree::Item for Fragment {
 
     fn summarize(&self) -> Self::Summary {
         if self.is_visible() {
-            let fragment_2d_start = self.insertion
+            let fragment_2d_start = self
+                .insertion
                 .text
                 .point_for_offset(self.start_offset)
                 .unwrap();
-            let fragment_2d_end = self.insertion
+            let fragment_2d_end = self
+                .insertion
                 .text
                 .point_for_offset(self.end_offset)
                 .unwrap();
@@ -2445,13 +2461,16 @@ impl tree::Item for Fragment {
             let first_row_len = if fragment_2d_start.row == fragment_2d_end.row {
                 (self.end_offset - self.start_offset) as u32
             } else {
-                let first_row_end = self.insertion
+                let first_row_end = self
+                    .insertion
                     .text
                     .offset_for_point(Point::new(fragment_2d_start.row + 1, 0))
-                    .unwrap() - 1;
+                    .unwrap()
+                    - 1;
                 (first_row_end - self.start_offset) as u32
             };
-            let (longest_row, longest_row_len) = self.insertion
+            let (longest_row, longest_row_len) = self
+                .insertion
                 .text
                 .longest_row_in_range(self.start_offset..self.end_offset)
                 .unwrap();
@@ -2653,7 +2672,8 @@ mod tests {
                         &reference_string[0..old_range.start],
                         new_text.as_str(),
                         &reference_string[old_range.end..],
-                    ].concat();
+                    ]
+                    .concat();
                 }
                 assert_eq!(buffer.to_string(), reference_string);
             }
@@ -3214,13 +3234,15 @@ mod tests {
         let buffer_2 = Buffer::remote(
             foreground.clone(),
             rpc::tests::connect(&mut reactor, super::rpc::Service::new(buffer_1.clone())),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(selections(&buffer_1), selections(&buffer_2));
 
         let buffer_3 = Buffer::remote(
             foreground,
             rpc::tests::connect(&mut reactor, super::rpc::Service::new(buffer_1.clone())),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(selections(&buffer_1), selections(&buffer_3));
 
         let mut buffer_1_updates = buffer_1.borrow().updates();

@@ -46,7 +46,10 @@ struct ConnectionState {
 }
 
 impl<T: server::Service> Service<T> {
-    pub fn state(&self) -> Result<T::State, Error> {
+    pub fn state(&self) -> Result<T::State, Error>
+    where
+        T::State: std::fmt::Debug,
+    {
         println!("Service.state()");
         let connection = self.registration.connection()?;
         println!("Service.state() - got connection");
@@ -57,15 +60,12 @@ impl<T: server::Service> Service<T> {
             .get(&self.registration.service_id)
             .ok_or(Error::ServiceDropped)?;
         println!("Service.state() - client_state={:?}", client_state);
-
-        match deserialize(&client_state.state) {
-            Ok(state) => Ok(state),
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                Err(Error::DeserializeError)
-            }
-        }
-        // Ok(deserialize(&client_state.state).unwrap())
+        let deserialized_state = deserialize(&client_state.state).unwrap();
+        println!(
+            "Service.state() - deserialized_state={:?}",
+            deserialized_state
+        );
+        Ok(deserialized_state)
     }
 
     pub fn updates(&self) -> Result<Box<Stream<Item = T::Update, Error = ()>>, Error> {
@@ -136,7 +136,7 @@ impl<T: server::Service> Clone for Service<T> {
 
 impl<T, S> FullUpdateService<S>
 where
-    T: 'static + Serialize + for<'a> Deserialize<'a>,
+    T: 'static + Serialize + for<'a> Deserialize<'a> + std::fmt::Debug,
     S: server::Service<State = T, Update = T>,
 {
     pub fn new(service: Service<S>) -> Self {

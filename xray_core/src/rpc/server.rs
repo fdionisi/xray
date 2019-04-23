@@ -14,7 +14,7 @@ use std::mem;
 use std::rc::{Rc, Weak};
 
 pub trait Service {
-    type State: 'static + Serialize + for<'a> Deserialize<'a>;
+    type State: 'static + Serialize + for<'a> Deserialize<'a> + std::fmt::Debug;
     type Update: 'static + Serialize + for<'a> Deserialize<'a>;
     type Request: 'static + Serialize + for<'a> Deserialize<'a>;
     type Response: 'static + Serialize + for<'a> Deserialize<'a>;
@@ -226,8 +226,9 @@ impl Connection {
                     updates,
                     removals,
                     responses,
-                })).unwrap()
-                    .into();
+                }))
+                .unwrap()
+                .into();
             Ok(Async::Ready(Some(message)))
         } else {
             self.0.borrow_mut().pending_task = Some(task::current());
@@ -251,7 +252,8 @@ impl Stream for Connection {
             Err(error) => {
                 let message = serialize::<Result<MessageToClient, Error>>(&Err(Error::IoError(
                     format!("{}", error),
-                ))).unwrap();
+                )))
+                .unwrap();
                 return Ok(Async::Ready(Some(message.into())));
             }
         }
