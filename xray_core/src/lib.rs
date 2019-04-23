@@ -34,6 +34,7 @@ pub mod rpc;
 pub mod window;
 pub mod workspace;
 
+mod discussion;
 mod file_finder;
 mod fuzzy;
 mod movement;

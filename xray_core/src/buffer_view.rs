@@ -873,7 +873,8 @@ impl BufferView {
                 if index > 0
                     && buffer
                         .cmp_anchors(&selections[index - 1].end, &start)
-                        .unwrap() == Ordering::Greater
+                        .unwrap()
+                        == Ordering::Greater
                 {
                     index - 1
                 } else {
@@ -1785,21 +1786,13 @@ mod tests {
         );
 
         let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor
-            .buffer
-            .borrow_mut()
-            .edit(&[0..0], "123");
+        editor.buffer.borrow_mut().edit(&[0..0], "123");
 
         editor.edit("ä");
         editor.edit("a");
 
         assert_eq!(editor.buffer.borrow().to_string(), "äa123");
-        assert_eq!(
-            render_selections(&editor),
-            vec![
-                selection((0, 2), (0, 2)),
-            ]
-        );
+        assert_eq!(render_selections(&editor), vec![selection((0, 2), (0, 2)),]);
     }
 
     #[test]

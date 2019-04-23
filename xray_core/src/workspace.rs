@@ -1,6 +1,7 @@
 use buffer::{self, Buffer, BufferId};
 use buffer_view::{BufferView, BufferViewDelegate};
 use cross_platform;
+use discussion::{Discussion, DiscussionService, DiscussionView, DiscussionViewDelegate};
 use file_finder::{FileFinderView, FileFinderViewDelegate};
 use futures::{Future, Poll, Stream};
 use never::Never;
@@ -24,17 +25,20 @@ pub trait Workspace {
     fn user_id(&self) -> UserId;
     fn project(&self) -> Ref<Project>;
     fn project_mut(&self) -> RefMut<Project>;
+    fn discussion(&self) -> &Rc<RefCell<Discussion>>;
 }
 
 pub struct LocalWorkspace {
-    next_user_id: UserId,
+    next_user_id: usize,
     user_id: UserId,
+    discussion: Rc<RefCell<Discussion>>,
     project: Rc<RefCell<LocalProject>>,
 }
 
 pub struct RemoteWorkspace {
     user_id: UserId,
     project: Rc<RefCell<RemoteProject>>,
+    discussion: Rc<RefCell<Discussion>>,
 }
 
 pub struct WorkspaceService {
@@ -45,6 +49,7 @@ pub struct WorkspaceService {
 pub struct ServiceState {
     user_id: UserId,
     project: rpc::ServiceId,
+    discussion: rpc::ServiceId,
 }
 
 pub struct WorkspaceView {
@@ -78,6 +83,7 @@ impl LocalWorkspace {
             user_id: 0,
             next_user_id: 1,
             project: project.into_shared(),
+            discussion: Discussion::new(0).into_shared(),
         }
     }
 }
@@ -94,6 +100,10 @@ impl Workspace for LocalWorkspace {
     fn project_mut(&self) -> RefMut<Project> {
         self.project.borrow_mut()
     }
+
+    fn discussion(&self) -> &Rc<RefCell<Discussion>> {
+        &self.discussion
+    }
 }
 
 impl RemoteWorkspace {
@@ -103,9 +113,16 @@ impl RemoteWorkspace {
     ) -> Result<Self, rpc::Error> {
         let state = service.state()?;
         let project = RemoteProject::new(foreground.clone(), service.take_service(state.project)?)?;
+        let discussion = Discussion::remote(
+            foreground,
+            state.user_id,
+            service.take_service(state.discussion)?,
+        )?;
+
         Ok(Self {
             user_id: state.user_id,
             project: project.into_shared(),
+            discussion,
         })
     }
 }
@@ -121,6 +138,10 @@ impl Workspace for RemoteWorkspace {
 
     fn project_mut(&self) -> RefMut<Project> {
         self.project.borrow_mut()
+    }
+
+    fn discussion(&self) -> &Rc<RefCell<Discussion>> {
+        &self.discussion
     }
 }
 
@@ -144,6 +165,12 @@ impl server::Service for WorkspaceService {
             user_id,
             project: connection
                 .add_service(ProjectService::new(workspace.project.clone()))
+                .service_id(),
+            discussion: connection
+                .add_service(DiscussionService::new(
+                    user_id,
+                    workspace.discussion.clone(),
+                ))
                 .service_id(),
         }
     }
@@ -245,6 +272,10 @@ impl View for WorkspaceView {
     fn will_mount(&mut self, window: &mut Window, view_handle: WeakViewHandle<Self>) {
         self.self_handle = Some(view_handle.clone());
         self.window_handle = Some(window.handle());
+        self.left_panel = Some(window.add_view(DiscussionView::new(
+            self.workspace.borrow().discussion().clone(),
+            view_handle,
+        )))
     }
 
     fn dispatch_action(&mut self, action: serde_json::Value, window: &mut Window) {
@@ -259,6 +290,16 @@ impl View for WorkspaceView {
 impl BufferViewDelegate for WorkspaceView {
     fn set_active_buffer_view(&mut self, handle: WeakViewHandle<BufferView>) {
         self.active_buffer_view = Some(handle);
+    }
+}
+
+impl DiscussionViewDelegate for WorkspaceView {
+    fn anchor(&self) -> Option<project::Anchor> {
+        unimplemented!()
+    }
+
+    fn jump(&self, anchor: &project::Anchor) -> Option<project::Anchor> {
+        unimplemented!()
     }
 }
 
