@@ -31,6 +31,7 @@ const theme = {
 const keyBindings = [
   { key: "cmd-t", context: "Workspace", action: "ToggleFileFinder" },
   { key: "ctrl-t", context: "Workspace", action: "ToggleFileFinder" },
+  { key: "ctrl-b", context: "Workspace", action: "ToggleDiscussion" },
   { key: "cmd-s", context: "Workspace", action: "SaveActiveBuffer" },
   { key: "up", context: "FileFinder", action: "SelectPrevious" },
   { key: "down", context: "FileFinder", action: "SelectNext" },

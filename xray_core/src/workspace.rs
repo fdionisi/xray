@@ -74,6 +74,7 @@ pub struct Anchor {
 #[serde(tag = "type")]
 enum WorkspaceViewAction {
     ToggleFileFinder,
+    ToggleDiscussion,
     SaveActiveBuffer,
 }
 
@@ -111,13 +112,17 @@ impl RemoteWorkspace {
         foreground: ForegroundExecutor,
         service: client::Service<WorkspaceService>,
     ) -> Result<Self, rpc::Error> {
+        println!("RemoteWorkspace::new()");
         let state = service.state()?;
+        println!("RemoteWorkspace::new() - got state");
         let project = RemoteProject::new(foreground.clone(), service.take_service(state.project)?)?;
+        println!("RemoteWorkspace::new() - got project");
         let discussion = Discussion::remote(
             foreground,
             state.user_id,
             service.take_service(state.discussion)?,
         )?;
+        println!("RemoteWorkspace::new() - got discussion");
 
         Ok(Self {
             user_id: state.user_id,
@@ -203,7 +208,20 @@ impl WorkspaceView {
         self.updates.set(());
     }
 
-    fn open_buffer<T>(&self, buffer: T)
+    fn toggle_discussion(&mut self, window: &mut Window) {
+        if self.left_panel.is_some() {
+            self.left_panel = None;
+        } else {
+            let delegate = self.self_handle.as_ref().cloned().unwrap();
+            self.left_panel = Some(window.add_view(DiscussionView::new(
+                self.workspace.borrow().discussion().clone(),
+                delegate,
+            )));
+        }
+        self.updates.set(());
+    }
+
+    fn open_buffer<T>(&self, buffer: T, selected_range: Option<Range<buffer::Anchor>>)
     where
         T: 'static + Future<Item = Rc<RefCell<Buffer>>, Error = project::Error>,
     {
@@ -218,6 +236,14 @@ impl WorkspaceView {
                                 let mut buffer_view =
                                     BufferView::new(buffer, user_id, Some(view_handle.clone()));
                                 buffer_view.set_line_height(20.0);
+                                if let Some(selected_range) = selected_range {
+                                    if let Err(error) =
+                                        buffer_view.set_selected_anchor_range(selected_range)
+                                    {
+                                        eprintln!("Error setting anchor range: {:?}", error);
+                                        unimplemented!("Error setting anchor range: {:?}", error);
+                                    }
+                                }
                                 let buffer_view = window.add_view(buffer_view);
                                 buffer_view.focus().unwrap();
                                 view_handle.map(|view| {
@@ -281,6 +307,7 @@ impl View for WorkspaceView {
     fn dispatch_action(&mut self, action: serde_json::Value, window: &mut Window) {
         match serde_json::from_value(action) {
             Ok(WorkspaceViewAction::ToggleFileFinder) => self.toggle_file_finder(window),
+            Ok(WorkspaceViewAction::ToggleDiscussion) => self.toggle_discussion(window),
             Ok(WorkspaceViewAction::SaveActiveBuffer) => self.save_active_buffer(),
             Err(error) => eprintln!("Unrecognized action {}", error),
         }
@@ -304,7 +331,11 @@ impl DiscussionViewDelegate for WorkspaceView {
     }
 
     fn jump(&self, anchor: &Anchor) {
-        unimplemented!()
+        let workspace = self.workspace.borrow();
+        self.open_buffer(
+            workspace.project().open_buffer(anchor.buffer_id),
+            Some(anchor.range.clone()),
+        );
     }
 }
 
@@ -327,7 +358,7 @@ impl FileFinderViewDelegate for WorkspaceView {
 
     fn did_confirm(&mut self, tree_id: TreeId, path: &cross_platform::Path, _: &mut Window) {
         let workspace = self.workspace.borrow();
-        self.open_buffer(workspace.project().open_path(tree_id, path));
+        self.open_buffer(workspace.project().open_path(tree_id, path), None);
     }
 }
 

@@ -7,7 +7,10 @@ const $ = React.createElement;
 const Root = styled("div", {
   width: "100%",
   height: "100%",
-  padding: "5px",
+  paddingTop: "5px",
+  paddingRight: "5px",
+  paddingBottom: "5px",
+  paddingLeft: 0,
   margin: 0,
   display: "flex",
   flexDirection: "column",
@@ -17,11 +20,13 @@ const Root = styled("div", {
 
 const Messages = styled("div", {
   flex: 1,
+  display: "flex",
+  flexDirection: "column",
   background: "white",
   marginBottom: "5px",
-  overflowY: "scroll",
+  overflowY: "auto",
   "::-webkit-scrollbar": {
-    width: "5px",
+    width: "5px"
   },
   "::-webkit-scrollbar-thumb": {
     borderRadius: "5px",
@@ -29,17 +34,19 @@ const Messages = styled("div", {
   }
 });
 
-const Message = styled("div", {
+const Message = styled("div", ({ $first }) => ({
   padding: "5px",
   fontFamily: "Helvetica Neue",
   cursor: "default",
+  overflowWrap: "break-word",
+  marginTop: $first ? "auto" : null,
   ":hover": {
     background: "rgba(31, 150, 255, 0.3)"
   }
-});
+}));
 
-const Avatar = styled("div", ({ color }) => {
-  const { r, g, b, a } = color;
+const Avatar = styled("div", ({ $color }) => {
+  const { r, g, b, a } = $color;
   return {
     backgroundColor: `rgba(${r}, ${g}, ${b}, ${a})`,
     display: "inline-block",
@@ -89,13 +96,15 @@ class Discussion extends React.Component {
             this.messages = messages;
           }
         },
-        this.props.messages.map(message => {
-          const avatarColor =
-            userColors[message.user_id % userColors.length];
+        this.props.messages.map((message, i) => {
+          const avatarColor = userColors[message.user_id % userColors.length];
           return $(
             Message,
-            null,
-            $(Avatar, { color: avatarColor }),
+            {
+              $first: i === 0,
+              onClick: () => this.jumpToAnchor(message.index)
+            },
+            $(Avatar, { $color: avatarColor }),
             message.text
           );
         })
@@ -120,6 +129,13 @@ class Discussion extends React.Component {
       }
       event.preventDefault();
     }
+  }
+
+  jumpToAnchor(index) {
+    this.props.dispatch({
+      type: "Jump",
+      message_index: index
+    });
   }
 }
 

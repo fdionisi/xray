@@ -6,6 +6,7 @@ const Modal = require("./modal");
 const View = require("./view");
 const { ActionContext, Action } = require("./action_dispatcher");
 const $ = React.createElement;
+const VerticalToolbar = require("./vertical_toolbar");
 
 const Root = styled("div", {
   position: "relative",
@@ -43,8 +44,9 @@ const BackgroundTip = styled("div", {
 });
 
 class Workspace extends React.Component {
-  constructor(props) {
-    super(props);
+  constructor() {
+    super();
+    this.toggleDiscussion = this.toggleDiscussion.bind(this);
   }
 
   render() {
@@ -71,6 +73,7 @@ class Workspace extends React.Component {
       $(
         Root,
         { tabIndex: -1 },
+        $(VerticalToolbar, { onToggleDiscussion: this.toggleDiscussion }),
         leftPanel,
         $(Pane, null, $(PaneInner, null, centerItem)),
         modal,
@@ -82,6 +85,10 @@ class Workspace extends React.Component {
 
   componentDidMount() {
     ReactDOM.findDOMNode(this).focus();
+  }
+
+  toggleDiscussion() {
+    this.props.dispatch({ type: "ToggleDiscussion" });
   }
 }
 

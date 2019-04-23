@@ -14,6 +14,7 @@ pub enum Error {
     ServiceNotFound,
     ServiceTaken,
     UpdatesTaken,
+    DeserializeError,
 }
 
 impl fmt::Display for Error {
@@ -36,6 +37,7 @@ impl error::Error for Error {
             Error::ServiceNotFound => "service not found",
             Error::ServiceTaken => "service taken",
             Error::UpdatesTaken => "updates taken",
+            Error::DeserializeError => "unable to deserialize state",
         }
     }
 }
@@ -98,11 +100,9 @@ pub(crate) mod tests {
         let response = reactor.run(request_future).unwrap();
         assert_eq!(response, TestServiceResponse::Ack);
         assert!(child_client.state().is_ok());
-        assert!(
-            reactor
-                .run(child_client.request(TestRequest::Increment(5)))
-                .is_ok()
-        );
+        assert!(reactor
+            .run(child_client.request(TestRequest::Increment(5)))
+            .is_ok());
         assert_eq!(Rc::strong_count(&child_model), 3);
 
         drop(child_client);

@@ -26,6 +26,7 @@ pub struct FullUpdateService<T: server::Service> {
     service: Service<T>,
 }
 
+#[derive(Debug)]
 struct ServiceState {
     has_client: bool,
     state: Bytes,
@@ -46,13 +47,25 @@ struct ConnectionState {
 
 impl<T: server::Service> Service<T> {
     pub fn state(&self) -> Result<T::State, Error> {
+        println!("Service.state()");
         let connection = self.registration.connection()?;
+        println!("Service.state() - got connection");
         let connection = connection.borrow();
+        println!("Service.state() - borrow connection");
         let client_state = connection
             .client_states
             .get(&self.registration.service_id)
             .ok_or(Error::ServiceDropped)?;
-        Ok(deserialize(&client_state.state).unwrap())
+        println!("Service.state() - client_state={:?}", client_state);
+
+        match deserialize(&client_state.state) {
+            Ok(state) => Ok(state),
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                Err(Error::DeserializeError)
+            }
+        }
+        // Ok(deserialize(&client_state.state).unwrap())
     }
 
     pub fn updates(&self) -> Result<Box<Stream<Item = T::Update, Error = ()>>, Error> {
@@ -334,7 +347,7 @@ impl Stream for Connection {
 
         match self.0.borrow_mut().outgoing_rx.poll() {
             Ok(Async::Ready(Some(message))) => {
-                return Ok(Async::Ready(Some(serialize(&message).unwrap().into())))
+                return Ok(Async::Ready(Some(serialize(&message).unwrap().into())));
             }
             Ok(Async::Ready(None)) => unreachable!(),
             Ok(Async::NotReady) => {}
