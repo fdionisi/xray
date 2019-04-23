@@ -43,8 +43,8 @@ const BackgroundTip = styled("div", {
 });
 
 class Workspace extends React.Component {
-  constructor() {
-    super();
+  constructor(props) {
+    super(props);
   }
 
   render() {

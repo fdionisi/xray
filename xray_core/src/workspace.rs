@@ -294,11 +294,16 @@ impl BufferViewDelegate for WorkspaceView {
 }
 
 impl DiscussionViewDelegate for WorkspaceView {
-    fn anchor(&self) -> Option<project::Anchor> {
-        unimplemented!()
+    fn anchor(&self) -> Option<Anchor> {
+        self.active_buffer_view.as_ref().and_then(|handle| {
+            handle.map(|buffer_view| Anchor {
+                buffer_id: buffer_view.buffer_id(),
+                range: buffer_view.selections().last().unwrap().anchor_range(),
+            })
+        })
     }
 
-    fn jump(&self, anchor: &project::Anchor) -> Option<project::Anchor> {
+    fn jump(&self, anchor: &Anchor) {
         unimplemented!()
     }
 }
