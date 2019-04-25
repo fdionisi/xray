@@ -50,22 +50,13 @@ impl<T: server::Service> Service<T> {
     where
         T::State: std::fmt::Debug,
     {
-        println!("Service.state()");
         let connection = self.registration.connection()?;
-        println!("Service.state() - got connection");
         let connection = connection.borrow();
-        println!("Service.state() - borrow connection");
         let client_state = connection
             .client_states
             .get(&self.registration.service_id)
             .ok_or(Error::ServiceDropped)?;
-        println!("Service.state() - client_state={:?}", client_state);
-        let deserialized_state = deserialize(&client_state.state).unwrap();
-        println!(
-            "Service.state() - deserialized_state={:?}",
-            deserialized_state
-        );
-        Ok(deserialized_state)
+        Ok(deserialize(&client_state.state).unwrap())
     }
 
     pub fn updates(&self) -> Result<Box<Stream<Item = T::Update, Error = ()>>, Error> {

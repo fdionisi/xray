@@ -16,6 +16,7 @@ pub trait DiscussionViewDelegate {
     fn jump(&self, anchor: &workspace::Anchor);
 }
 
+#[derive(Clone)]
 pub struct Discussion {
     messages: Vec<Message>,
     local_user_id: UserId,
