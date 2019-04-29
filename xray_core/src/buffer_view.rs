@@ -70,6 +70,10 @@ enum BufferViewAction {
     SelectDown,
     SelectLeft,
     SelectRight,
+    SelectTo {
+        row: u32,
+        column: u32,
+    },
     SelectToBeginningOfWord,
     SelectToEndOfWord,
     SelectToBeginningOfLine,
@@ -271,10 +275,11 @@ impl BufferView {
     }
 
     pub fn set_cursor_position(&mut self, position: Point, autoscroll: bool) {
+        let position = self.buffer.borrow().clip_point(position);
+
         self.buffer
             .borrow_mut()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                // TODO: Clip point or return a result.
                 let anchor = buffer.anchor_before_point(position).unwrap();
                 selections.clear();
                 selections.push(Selection {
@@ -293,10 +298,11 @@ impl BufferView {
     pub fn add_selection(&mut self, start: Point, end: Point) {
         debug_assert!(start <= end); // TODO: Reverse selection if end < start
 
+        let start = self.buffer.borrow().clip_point(start);
+        let end = self.buffer.borrow().clip_point(end);
         self.buffer
             .borrow_mut()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                // TODO: Clip points or return a result.
                 let start_anchor = buffer.anchor_before_point(start).unwrap();
                 let end_anchor = buffer.anchor_before_point(end).unwrap();
 
@@ -503,6 +509,20 @@ impl BufferView {
                         .anchor_before_point(movement::right(&buffer, head))
                         .unwrap();
                     selection.set_head(&buffer, cursor);
+                    selection.goal_column = None;
+                }
+            })
+            .unwrap();
+        self.autoscroll_to_cursor(false);
+    }
+
+    pub fn select_to(&mut self, position: Point) {
+        self.buffer
+            .borrow_mut()
+            .mutate_selections(self.selection_set_id, |buffer, selections| {
+                for selection in selections.iter_mut() {
+                    let anchor = buffer.anchor_before_point(position).unwrap();
+                    selection.set_head(buffer, anchor);
                     selection.goal_column = None;
                 }
             })
@@ -1015,7 +1035,7 @@ impl View for BufferView {
         }
 
         let longest_row = buffer.longest_row();
-        let longest_line = if start.row <= longest_row && longest_row <= end.row {
+        let longest_line = if start.row <= longest_row && longest_row < end.row {
             lines[(longest_row - start.row) as usize].clone()
         } else {
             String::from_utf16_lossy(&buffer.line(buffer.longest_row()).unwrap())
@@ -1088,6 +1108,10 @@ impl View for BufferView {
             Ok(BufferViewAction::SelectDown) => self.select_down(),
             Ok(BufferViewAction::SelectLeft) => self.select_left(),
             Ok(BufferViewAction::SelectRight) => self.select_right(),
+            Ok(BufferViewAction::SelectTo {
+                row,
+                column
+            }) => self.select_to(Point::new(row, column)),
             Ok(BufferViewAction::SelectToBeginningOfWord) => self.select_to_beginning_of_word(),
             Ok(BufferViewAction::SelectToEndOfWord) => self.select_to_end_of_word(),
             Ok(BufferViewAction::SelectToBeginningOfLine) => self.select_to_beginning_of_line(),
@@ -1302,6 +1326,27 @@ mod tests {
         editor.move_up();
         editor.move_up();
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 1)]);
+
+        // Select to a direct point in front of cursor position
+        editor.select_to(Point::new(1, 0));
+        assert_eq!(render_selections(&editor), vec![selection((0, 1), (1, 0))]);
+        editor.move_right(); // cancel selection
+        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+        editor.move_right();
+        editor.move_right();
+        assert_eq!(render_selections(&editor), vec![empty_selection(2, 1)]);
+
+        // Selection can even go to a point before the cursor (with reverse)
+        editor.select_to(Point::new(0, 0));
+        assert_eq!(render_selections(&editor), vec![rev_selection((0, 0), (2, 1))]);
+
+        // A selection can switch to a new point and the selection will update
+        editor.select_to(Point::new(0, 3));
+        assert_eq!(render_selections(&editor), vec![rev_selection((0, 3), (2, 1))]);
+
+        // A selection can even swing around the cursor without having to unselect
+        editor.select_to(Point::new(2, 3));
+        assert_eq!(render_selections(&editor), vec![selection((2, 1), (2, 3))]);
     }
 
     #[test]
@@ -1894,6 +1939,23 @@ mod tests {
             assert_eq!(stringify_lines(&frame["lines"]), vec!["def", "ghi", "jkl"]);
             assert_eq!(frame["selections"], json!([]));
         }
+    }
+
+    #[test]
+    fn test_longest_line_in_frame() {
+        let buffer = Rc::new(RefCell::new(Buffer::new(0)));
+        buffer
+            .borrow_mut()
+            .edit(&[0..0], "1\n1\n1\n1\n11\n1\n1");
+        let line_height = 6.0;
+
+        let mut editor = BufferView::new(buffer.clone(), 0, None);
+        editor
+            .set_height(2.0 * line_height)
+            .set_line_height(line_height)
+            .set_scroll_top(2.0 * line_height);
+        
+        let _ = editor.render();
     }
 
     #[test]
