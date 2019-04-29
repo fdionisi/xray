@@ -1032,7 +1032,7 @@ impl View for BufferView {
         }
 
         let longest_row = buffer.longest_row();
-        let longest_line = if start.row <= longest_row && longest_row <= end.row {
+        let longest_line = if start.row <= longest_row && longest_row < end.row {
             lines[(longest_row - start.row) as usize].clone()
         } else {
             String::from_utf16_lossy(&buffer.line(buffer.longest_row()).unwrap())
@@ -1944,6 +1944,23 @@ mod tests {
             assert_eq!(stringify_lines(&frame["lines"]), vec!["def", "ghi", "jkl"]);
             assert_eq!(frame["selections"], json!([]));
         }
+    }
+
+    #[test]
+    fn test_longest_line_in_frame() {
+        let buffer = Rc::new(RefCell::new(Buffer::new(0)));
+        buffer
+            .borrow_mut()
+            .edit(&[0..0], "1\n1\n1\n1\n11\n1\n1");
+        let line_height = 6.0;
+
+        let mut editor = BufferView::new(buffer.clone(), 0, None);
+        editor
+            .set_height(2.0 * line_height)
+            .set_line_height(line_height)
+            .set_scroll_top(2.0 * line_height);
+        
+        let _ = editor.render();
     }
 
     #[test]
