@@ -1,12 +1,15 @@
 extern crate bytes;
 extern crate futures;
 extern crate wasm_bindgen;
+extern crate wasm_bindgen_futures;
 #[macro_use]
 extern crate xray_core;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
+extern crate js_sys;
 extern crate serde_json;
+extern crate web_sys;
 
 use bytes::Bytes;
 use futures::executor::{self, Notify, Spawn};
@@ -20,6 +23,7 @@ use std::mem;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::{future_to_promise, JsFuture};
 use xray_core::app::Command;
 use xray_core::{cross_platform, App, ViewId, WindowId, WindowUpdate};
 
@@ -42,6 +46,9 @@ enum IncomingMessage {
 
 #[derive(Clone)]
 pub struct Executor(Rc<RefCell<ExecutorState>>);
+
+#[derive(Clone)]
+pub struct BackgroundExecutor(Rc<RefCell<ExecutorState>>);
 
 struct ExecutorState {
     next_spawn_id: usize,
@@ -79,6 +86,9 @@ struct FileProvider;
 // would otherwise interpret lib/support as an NPM module.
 #[wasm_bindgen(module = "./../lib/support")]
 extern "C" {
+    #[wasm_bindgen(js_name = requestIdleCallbackPromise)]
+    fn request_idle_callback(callback: &js_sys::Promise) -> js_sys::Promise;
+
     #[wasm_bindgen(js_name = notifyOnNextTick)]
     fn notify_on_next_tick(notify: NotifyHandle);
 
@@ -119,6 +129,56 @@ impl<F: 'static + Future<Item = (), Error = ()>> future::Executor<F> for Executo
         }
 
         let mut spawn = executor::spawn(future);
+        match spawn.poll_future_notify(&notify_handle, id) {
+            Ok(Async::NotReady) => {
+                self.0
+                    .borrow_mut()
+                    .futures
+                    .insert(id, Rc::new(RefCell::new(spawn)));
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+}
+
+impl BackgroundExecutor {
+    fn new() -> Self {
+        let state = Rc::new(RefCell::new(ExecutorState {
+            next_spawn_id: 0,
+            futures: HashMap::new(),
+            pending: HashMap::new(),
+            notify_handle: None,
+        }));
+        state.borrow_mut().notify_handle = Some(Arc::new(NotifyHandle(Rc::downgrade(&state))));
+        BackgroundExecutor(state)
+    }
+}
+
+impl<F: 'static + Future<Item = (), Error = ()>> future::Executor<F> for BackgroundExecutor {
+    fn execute(&self, future: F) -> Result<(), future::ExecuteError<F>> {
+        let id;
+        let notify_handle;
+
+        // Drop the dynamic borrow of state before polling the future for the first time,
+        // because polling might cause a reentrant call to this method.
+        {
+            let mut state = self.0.borrow_mut();
+            id = state.next_spawn_id;
+            state.next_spawn_id += 1;
+            notify_handle = state.notify_handle.as_ref().unwrap().clone();
+        }
+
+        let promise = JsFuture::from(request_idle_callback(&future_to_promise(
+            future
+                .map(|_| JsValue::UNDEFINED)
+                .map_err(|e| JsValue::from_str(&format!("Error from future: {:?}", e))),
+        )))
+        .map(|_| ())
+        .map_err(|e| eprintln!("Error from JsFuture: {:?}", e));
+
+        let mut spawn = executor::spawn(promise);
         match spawn.poll_future_notify(&notify_handle, id) {
             Ok(Async::NotReady) => {
                 self.0
@@ -250,8 +310,7 @@ impl Sink for JsSink {
 impl Server {
     pub fn new() -> Self {
         let foreground_executor = Rc::new(Executor::new());
-        // TODO: use a requestIdleCallback-based executor here instead.
-        let background_executor = foreground_executor.clone();
+        let background_executor = Rc::new(BackgroundExecutor::new());
         Server {
             app: App::new(
                 false,
@@ -318,7 +377,8 @@ impl Server {
             Err(_) => {
                 let error = stream::once(Ok(OutgoingMessage::Error {
                     description: format!("No window exists for id {}", window_id),
-                })).map(|message| serde_json::to_vec(&message).unwrap());
+                }))
+                .map(|message| serde_json::to_vec(&message).unwrap());
                 self.executor
                     .execute(Box::new(outgoing.send_all(error).then(|_| Ok(()))))
                     .unwrap();
@@ -330,19 +390,22 @@ impl Server {
         use futures::future::Executor;
 
         let executor = self.executor.clone();
-        let connect_future = self.app
+        let connect_future = self
+            .app
             .borrow_mut()
             .connect_to_server(incoming.map_err(|_| unreachable!()))
             .map_err(|error| eprintln!("RPC error: {}", error))
             .and_then(move |connection| {
                 executor
                     .execute(Box::new(
-                        outgoing.send_all(
-                            connection
-                                // TODO: go back to using Vec<u8> for outgoing messages in xray_core.
-                                .map(|bytes| bytes.to_vec())
-                                .map_err(|_| unreachable!()),
-                        ).then(|_| Ok(())),
+                        outgoing
+                            .send_all(
+                                connection
+                                    // TODO: go back to using Vec<u8> for outgoing messages in xray_core.
+                                    .map(|bytes| bytes.to_vec())
+                                    .map_err(|_| unreachable!()),
+                            )
+                            .then(|_| Ok(())),
                     ))
                     .unwrap();
                 Ok(())
@@ -379,7 +442,8 @@ impl Test {
         use futures::future::Executor;
         self.executor
             .execute(Box::new(
-                outgoing.send_all(incoming.map(|bytes| bytes.to_vec()))
+                outgoing
+                    .send_all(incoming.map(|bytes| bytes.to_vec()))
                     .then(|_| Ok(())),
             ))
             .unwrap();

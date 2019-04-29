@@ -17,3 +17,17 @@ const promise = Promise.resolve();
 export function notifyOnNextTick(notifyHandle) {
   promise.then(() => notifyHandle.notify_from_js_on_next_tick());
 }
+
+export function requestIdleCallbackPromise(promise) {
+  return new Promise((resolve, reject) => {
+    requestIdleCallback(idleDedline => {
+      promise(idleDedline)
+        .then(() => {
+          resolve();
+        })
+        .catch(error => {
+          reject(error);
+        });
+    });
+  });
+}
