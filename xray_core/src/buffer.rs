@@ -735,6 +735,10 @@ impl Buffer {
         self.fragments.len::<Point>()
     }
 
+    pub fn clip_point(&self, original: Point) -> Point {
+        return cmp::max(cmp::min(original, self.max_point()), Point::new(0, 0));
+    }
+
     pub fn line(&self, row: u32) -> Result<Vec<u16>, Error> {
         let mut iterator = self.iter_starting_at_point(Point::new(row, 0)).peekable();
         if iterator.peek().is_none() {
@@ -3068,6 +3072,24 @@ mod tests {
         assert_eq!(buffer.offset_for_anchor(&after_start_anchor).unwrap(), 3);
         assert_eq!(buffer.offset_for_anchor(&before_end_anchor).unwrap(), 6);
         assert_eq!(buffer.offset_for_anchor(&after_end_anchor).unwrap(), 9);
+    }
+
+    #[test]
+    fn test_clip_point() {
+        let mut buffer = Buffer::new(0);
+        buffer.edit(&[0..0], "abcdefghi");
+
+        let point = buffer.clip_point(Point::new(0, 0));
+        assert_eq!(point.row, 0);
+        assert_eq!(point.column, 0);
+
+        let point = buffer.clip_point(Point::new(0, 2));
+        assert_eq!(point.row, 0);
+        assert_eq!(point.column, 2);
+
+        let point = buffer.clip_point(Point::new(1, 12));
+        assert_eq!(point.row, 0);
+        assert_eq!(point.column, 9);
     }
 
     #[test]
