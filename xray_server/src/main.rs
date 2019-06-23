@@ -1,12 +1,15 @@
+mod database;
+mod fs;
+mod git;
+mod json_lines_codec;
 mod messages;
 mod server;
-mod fs;
-mod json_lines_codec;
 
 extern crate bytes;
 extern crate futures;
 extern crate futures_cpupool;
-extern crate ignore;
+extern crate git2;
+extern crate memo_core;
 extern crate parking_lot;
 extern crate serde;
 #[macro_use]
@@ -16,16 +19,18 @@ extern crate tokio_core;
 extern crate tokio_io;
 extern crate tokio_process;
 extern crate tokio_uds;
+extern crate uuid;
 extern crate xray_core;
 
 use std::env;
+
 use futures::Stream;
-use tokio_core::reactor::Core;
-use tokio_io::AsyncRead;
-use tokio_uds::UnixListener;
 use json_lines_codec::JsonLinesCodec;
 use messages::{IncomingMessage, OutgoingMessage};
 use server::Server;
+use tokio_core::reactor::Core;
+use tokio_io::AsyncRead;
+use tokio_uds::UnixListener;
 
 fn main() {
     let headless =

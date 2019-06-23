@@ -1,9 +1,12 @@
 use bytes::Bytes;
+use database;
 use fs;
 use futures::{future, stream, Future, IntoFuture, Sink, Stream};
 use futures_cpupool::CpuPool;
+use git;
 use messages::{IncomingMessage, OutgoingMessage};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
@@ -18,6 +21,8 @@ use xray_core::{self, App, Never, WindowId};
 #[derive(Clone)]
 pub struct Server {
     app: Rc<RefCell<xray_core::App>>,
+    providers: Rc<RefCell<HashMap<PathBuf, Rc<git::GitProvider>>>>,
+    databases: Rc<RefCell<HashMap<PathBuf, Rc<RefCell<database::Database>>>>>,
     reactor: reactor::Handle,
 }
 
@@ -28,6 +33,8 @@ impl Server {
         let file_provider = fs::FileProvider::new();
         Server {
             app: App::new(headless, foreground, background, file_provider),
+            providers: Rc::new(RefCell::new(HashMap::new())),
+            databases: Rc::new(RefCell::new(HashMap::new())),
             reactor,
         }
     }
@@ -206,7 +213,11 @@ impl Server {
 
         let roots = paths
             .iter()
-            .map(|path| fs::Tree::new(path).unwrap())
+            .map(|path| {
+                let git = self.provider(path);
+                let database = self.database(path);
+                fs::Tree::new(path, git, database).unwrap()
+            })
             .collect();
         self.app.borrow_mut().open_local_workspace(roots);
         Ok(())
@@ -218,27 +229,29 @@ impl Server {
             .map_err(|_| "Error binding address".to_owned())?;
         let app = self.app.clone();
         let reactor = self.reactor.clone();
-        let handle_incoming =
-            listener
-                .incoming()
-                .map_err(|_| eprintln!("Error accepting incoming connection"))
-                .for_each(move |(socket, _)| {
-                    socket.set_nodelay(true).unwrap();
-                    let transport = codec::length_delimited::Framed::<_, Bytes>::new(socket);
-                    let (tx, rx) = transport.split();
-                    let connection =
-                        App::connect_to_client(app.clone(), rx.map(|frame| frame.into()));
-                    reactor.spawn(tx.send_all(
-                        connection.map_err(|_| -> io::Error { unreachable!() }),
-                    ).then(|result| {
-                        if let Err(error) = result {
-                            eprintln!("Error sending message to client on TCP socket: {}", error);
-                        }
+        let handle_incoming = listener
+            .incoming()
+            .map_err(|_| eprintln!("Error accepting incoming connection"))
+            .for_each(move |(socket, _)| {
+                socket.set_nodelay(true).unwrap();
+                let transport = codec::length_delimited::Framed::<_, Bytes>::new(socket);
+                let (tx, rx) = transport.split();
+                let connection = App::connect_to_client(app.clone(), rx.map(|frame| frame.into()));
+                reactor.spawn(
+                    tx.send_all(connection.map_err(|_| -> io::Error { unreachable!() }))
+                        .then(|result| {
+                            if let Err(error) = result {
+                                eprintln!(
+                                    "Error sending message to client on TCP socket: {}",
+                                    error
+                                );
+                            }
 
-                        Ok(())
-                    }));
-                    Ok(())
-                });
+                            Ok(())
+                        }),
+                );
+                Ok(())
+            });
         self.reactor.spawn(handle_incoming);
         Ok(())
     }
@@ -268,7 +281,8 @@ impl Server {
                                     connection
                                         .map(|bytes| bytes.into())
                                         .map_err(|_| -> io::Error { unreachable!() }),
-                                ).then(|result| {
+                                )
+                                .then(|result| {
                                     if let Err(error) = result {
                                         eprintln!(
                                             "Error sending message to server on TCP socket: {}",
@@ -295,6 +309,34 @@ impl Server {
                 .send_all(responses.map_err(|_| unreachable!()))
                 .then(|_| Ok(())),
         );
+    }
+
+    fn provider<P: Into<PathBuf>>(&self, path: P) -> Rc<git::GitProvider> {
+        let path = path.into();
+        let mut providers = self.providers.borrow_mut();
+        let provider = if let Some(provider) = providers.get(&path) {
+            provider.clone()
+        } else {
+            Rc::new(git::GitProvider::new(&path))
+        };
+
+        providers.insert(path, provider.clone());
+
+        provider
+    }
+
+    fn database<P: Into<PathBuf>>(&self, path: P) -> Rc<RefCell<database::Database>> {
+        let path = path.into();
+        let mut databases = self.databases.borrow_mut();
+        let database = if let Some(database) = databases.get(&path) {
+            database.clone()
+        } else {
+            Rc::new(RefCell::new(database::Database::new()))
+        };
+
+        databases.insert(path, database.clone());
+
+        database
     }
 }
 
