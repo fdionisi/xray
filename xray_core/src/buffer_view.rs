@@ -893,7 +893,8 @@ impl BufferView {
                 if index > 0
                     && buffer
                         .cmp_anchors(&selections[index - 1].end, &start)
-                        .unwrap() == Ordering::Greater
+                        .unwrap()
+                        == Ordering::Greater
                 {
                     index - 1
                 } else {
@@ -1107,10 +1108,9 @@ impl View for BufferView {
             Ok(BufferViewAction::SelectDown) => self.select_down(),
             Ok(BufferViewAction::SelectLeft) => self.select_left(),
             Ok(BufferViewAction::SelectRight) => self.select_right(),
-            Ok(BufferViewAction::SelectTo {
-                row,
-                column
-            }) => self.select_to(Point::new(row, column)),
+            Ok(BufferViewAction::SelectTo { row, column }) => {
+                self.select_to(Point::new(row, column))
+            }
             Ok(BufferViewAction::SelectToBeginningOfWord) => self.select_to_beginning_of_word(),
             Ok(BufferViewAction::SelectToEndOfWord) => self.select_to_end_of_word(),
             Ok(BufferViewAction::SelectToBeginningOfLine) => self.select_to_beginning_of_line(),
@@ -1153,11 +1153,16 @@ impl Drop for BufferView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use buffer::tests::build_base_buffer_id;
     use IntoShared;
 
     #[test]
     fn test_cursor_movement() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        let mut editor = BufferView::new(
+            Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+            0,
+            None,
+        );
         editor.buffer.borrow_mut().edit(&[0..0], "abc");
         editor.buffer.borrow_mut().edit(&[3..3], "\n");
         editor.buffer.borrow_mut().edit(&[4..4], "\ndef");
@@ -1238,7 +1243,11 @@ mod tests {
 
     #[test]
     fn test_selection_movement() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        let mut editor = BufferView::new(
+            Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+            0,
+            None,
+        );
         editor.buffer.borrow_mut().edit(&[0..0], "abc");
         editor.buffer.borrow_mut().edit(&[3..3], "\n");
         editor.buffer.borrow_mut().edit(&[4..4], "\ndef");
@@ -1337,11 +1346,17 @@ mod tests {
 
         // Selection can even go to a point before the cursor (with reverse)
         editor.select_to(Point::new(0, 0));
-        assert_eq!(render_selections(&editor), vec![rev_selection((0, 0), (2, 1))]);
+        assert_eq!(
+            render_selections(&editor),
+            vec![rev_selection((0, 0), (2, 1))]
+        );
 
         // A selection can switch to a new point and the selection will update
         editor.select_to(Point::new(0, 3));
-        assert_eq!(render_selections(&editor), vec![rev_selection((0, 3), (2, 1))]);
+        assert_eq!(
+            render_selections(&editor),
+            vec![rev_selection((0, 3), (2, 1))]
+        );
 
         // A selection can even swing around the cursor without having to unselect
         editor.select_to(Point::new(2, 3));
@@ -1350,7 +1365,11 @@ mod tests {
 
     #[test]
     fn test_move_to_beginning_or_end_of_word() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        let mut editor = BufferView::new(
+            Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+            0,
+            None,
+        );
         editor.buffer.borrow_mut().edit(&[0..0], "abc def\nghi.jkl");
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
 
@@ -1391,7 +1410,11 @@ mod tests {
 
     #[test]
     fn test_select_to_beginning_or_end_of_word() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        let mut editor = BufferView::new(
+            Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+            0,
+            None,
+        );
         editor.buffer.borrow_mut().edit(&[0..0], "abc def\nghi.jkl");
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
 
@@ -1459,7 +1482,11 @@ mod tests {
 
     #[test]
     fn test_move_to_beginning_or_end_of_line() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        let mut editor = BufferView::new(
+            Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+            0,
+            None,
+        );
         editor
             .buffer
             .borrow_mut()
@@ -1485,7 +1512,11 @@ mod tests {
 
     #[test]
     fn test_select_to_beginning_or_end_of_line() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        let mut editor = BufferView::new(
+            Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+            0,
+            None,
+        );
         editor
             .buffer
             .borrow_mut()
@@ -1523,7 +1554,11 @@ mod tests {
 
     #[test]
     fn test_select_word() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        let mut editor = BufferView::new(
+            Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+            0,
+            None,
+        );
         editor.buffer.borrow_mut().edit(&[0..0], "abc.def---ghi");
 
         editor.set_cursor_position(Point::new(0, 5), false);
@@ -1537,7 +1572,11 @@ mod tests {
 
     #[test]
     fn test_select_line() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        let mut editor = BufferView::new(
+            Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+            0,
+            None,
+        );
         editor.buffer.borrow_mut().edit(&[0..0], "abc\ndef\nghi");
 
         editor.set_cursor_position(Point::new(0, 2), false);
@@ -1551,7 +1590,11 @@ mod tests {
 
     #[test]
     fn test_move_to_top_or_bottom() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        let mut editor = BufferView::new(
+            Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+            0,
+            None,
+        );
         editor.buffer.borrow_mut().edit(&[0..0], "abc\ndef\nghi");
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
 
@@ -1563,7 +1606,11 @@ mod tests {
 
     #[test]
     fn test_select_to_top_or_bottom() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        let mut editor = BufferView::new(
+            Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+            0,
+            None,
+        );
         editor.buffer.borrow_mut().edit(&[0..0], "abc\ndef\nghi");
         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
 
@@ -1580,7 +1627,11 @@ mod tests {
 
     #[test]
     fn test_backspace() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        let mut editor = BufferView::new(
+            Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+            0,
+            None,
+        );
         editor.buffer.borrow_mut().edit(&[0..0], "abcdefghi");
         editor.add_selection(Point::new(0, 3), Point::new(0, 4));
         editor.add_selection(Point::new(0, 9), Point::new(0, 9));
@@ -1592,7 +1643,11 @@ mod tests {
 
     #[test]
     fn test_delete() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        let mut editor = BufferView::new(
+            Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+            0,
+            None,
+        );
         editor.buffer.borrow_mut().edit(&[0..0], "abcdefghi");
         editor.add_selection(Point::new(0, 3), Point::new(0, 4));
         editor.add_selection(Point::new(0, 9), Point::new(0, 9));
@@ -1604,7 +1659,11 @@ mod tests {
 
     #[test]
     fn test_add_selection() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        let mut editor = BufferView::new(
+            Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+            0,
+            None,
+        );
         editor
             .buffer
             .borrow_mut()
@@ -1658,7 +1717,11 @@ mod tests {
 
     #[test]
     fn test_add_selection_above() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        let mut editor = BufferView::new(
+            Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+            0,
+            None,
+        );
         editor.buffer.borrow_mut().edit(
             &[0..0],
             "\
@@ -1727,7 +1790,11 @@ mod tests {
 
     #[test]
     fn test_add_selection_below() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        let mut editor = BufferView::new(
+            Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+            0,
+            None,
+        );
         editor.buffer.borrow_mut().edit(
             &[0..0],
             "\
@@ -1787,7 +1854,11 @@ mod tests {
 
     #[test]
     fn test_set_cursor_position() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        let mut editor = BufferView::new(
+            Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+            0,
+            None,
+        );
         editor.buffer.borrow_mut().edit(&[0..0], "abc\ndef\nghi");
         editor.add_selection_below();
         editor.add_selection_below();
@@ -1806,7 +1877,11 @@ mod tests {
 
     #[test]
     fn test_edit() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        let mut editor = BufferView::new(
+            Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+            0,
+            None,
+        );
 
         editor
             .buffer
@@ -1829,27 +1904,23 @@ mod tests {
             ]
         );
 
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor
-            .buffer
-            .borrow_mut()
-            .edit(&[0..0], "123");
+        let mut editor = BufferView::new(
+            Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+            0,
+            None,
+        );
+        editor.buffer.borrow_mut().edit(&[0..0], "123");
 
         editor.edit("ä");
         editor.edit("a");
 
         assert_eq!(editor.buffer.borrow().to_string(), "äa123");
-        assert_eq!(
-            render_selections(&editor),
-            vec![
-                selection((0, 2), (0, 2)),
-            ]
-        );
+        assert_eq!(render_selections(&editor), vec![selection((0, 2), (0, 2)),]);
     }
 
     #[test]
     fn test_autoscroll() {
-        let mut buffer = Buffer::new(0);
+        let mut buffer = Buffer::new(build_base_buffer_id());
         buffer.edit(&[0..0], "abc\ndef\nghi\njkl\nmno\npqr\nstu\nvwx\nyz");
         let start = buffer.anchor_before_offset(0).unwrap();
         let end = buffer.anchor_before_offset(buffer.len()).unwrap();
@@ -1878,7 +1949,7 @@ mod tests {
 
     #[test]
     fn test_render() {
-        let buffer = Rc::new(RefCell::new(Buffer::new(0)));
+        let buffer = Rc::new(RefCell::new(Buffer::new(build_base_buffer_id())));
         buffer
             .borrow_mut()
             .edit(&[0..0], "abc\ndef\nghi\njkl\nmno\npqr\nstu\nvwx\nyz");
@@ -1950,10 +2021,8 @@ mod tests {
 
     #[test]
     fn test_longest_line_in_frame() {
-        let buffer = Rc::new(RefCell::new(Buffer::new(0)));
-        buffer
-            .borrow_mut()
-            .edit(&[0..0], "1\n1\n1\n1\n11\n1\n1");
+        let buffer = Rc::new(RefCell::new(Buffer::new(build_base_buffer_id())));
+        buffer.borrow_mut().edit(&[0..0], "1\n1\n1\n1\n11\n1\n1");
         let line_height = 6.0;
 
         let mut editor = BufferView::new(buffer.clone(), 0, None);
@@ -1961,14 +2030,18 @@ mod tests {
             .set_height(2.0 * line_height)
             .set_line_height(line_height)
             .set_scroll_top(2.0 * line_height);
-        
+
         let _ = editor.render();
     }
 
     #[test]
     fn test_render_past_last_line() {
         let line_height = 4.0;
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
+        let mut editor = BufferView::new(
+            Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+            0,
+            None,
+        );
         editor.buffer.borrow_mut().edit(&[0..0], "abc\ndef\nghi");
         editor.add_selection(Point::new(2, 3), Point::new(2, 3));
         editor
@@ -1990,7 +2063,7 @@ mod tests {
 
     #[test]
     fn test_dropping_view_removes_selection_set() {
-        let buffer = Buffer::new(0).into_shared();
+        let buffer = Buffer::new(build_base_buffer_id()).into_shared();
         let editor = BufferView::new(buffer.clone(), 0, None);
         let selection_set_id = editor.selection_set_id;
         assert!(buffer.borrow_mut().selections(selection_set_id).is_ok());

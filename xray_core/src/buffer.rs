@@ -20,12 +20,13 @@ use ForegroundExecutor;
 use IntoShared;
 use UserId;
 
+pub use memo_core::BufferId;
+
 pub type ReplicaId = usize;
 type LocalTimestamp = usize;
 type LamportTimestamp = usize;
 pub type SelectionSetId = usize;
 type SelectionSetVersion = usize;
-pub type BufferId = usize;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Version(
@@ -364,7 +365,8 @@ pub mod rpc {
 
         fn poll_outgoing_selection_updates(&mut self) -> Async<Option<Update>> {
             loop {
-                match self.buffer_updates
+                match self
+                    .buffer_updates
                     .poll()
                     .expect("Polling a NotifyCellObserver cannot produce an error")
                 {
@@ -500,12 +502,14 @@ pub mod rpc {
                         .remove_remote_selection_set(self.replica_id, set_id);
                     None
                 }
-                Request::Save => Some(Box::new(self.buffer.borrow().save().then(|result| {
-                    match result {
-                        Ok(_) => Ok(Response::Saved),
-                        Err(error) => Ok(Response::Error(error)),
-                    }
-                }))),
+                Request::Save => {
+                    Some(Box::new(self.buffer.borrow().save().then(
+                        |result| match result {
+                            Ok(_) => Ok(Response::Saved),
+                            Err(error) => Ok(Response::Error(error)),
+                        },
+                    )))
+                }
             }
         }
     }
@@ -638,7 +642,8 @@ impl Buffer {
             selections: selection_sets,
             next_local_selection_set_id: 0,
             file: None,
-        }.into_shared();
+        }
+        .into_shared();
 
         let buffer_weak = Rc::downgrade(&buffer);
         foreground
@@ -897,7 +902,8 @@ impl Buffer {
         F: FnOnce(&Buffer, &mut Vec<Selection>),
     {
         let id = (self.replica_id, set_id);
-        let mut set = self.selections
+        let mut set = self
+            .selections
             .remove(&id)
             .ok_or(Error::SelectionSetNotFound)?;
         f(self, &mut set.selections);
@@ -917,11 +923,15 @@ impl Buffer {
             let mut old_selections = selections.drain(..);
             if let Some(mut prev_selection) = old_selections.next() {
                 for selection in old_selections {
-                    if self.cmp_anchors(&prev_selection.end, &selection.start)
-                        .unwrap() >= Ordering::Equal
+                    if self
+                        .cmp_anchors(&prev_selection.end, &selection.start)
+                        .unwrap()
+                        >= Ordering::Equal
                     {
-                        if self.cmp_anchors(&selection.end, &prev_selection.end)
-                            .unwrap() > Ordering::Equal
+                        if self
+                            .cmp_anchors(&selection.end, &prev_selection.end)
+                            .unwrap()
+                            > Ordering::Equal
                         {
                             prev_selection.end = selection.end;
                         }
@@ -1107,7 +1117,8 @@ impl Buffer {
         set_id: SelectionSetId,
         state: SelectionSetState,
     ) {
-        let set = self.selections
+        let set = self
+            .selections
             .entry((replica_id, set_id))
             .or_insert(SelectionSet {
                 user_id: state.user_id,
@@ -1131,7 +1142,8 @@ impl Buffer {
     }
 
     fn resolve_fragment_id(&self, edit_id: EditId, offset: usize) -> Result<FragmentId, Error> {
-        let split_tree = self.insertion_splits
+        let split_tree = self
+            .insertion_splits
             .get(&edit_id)
             .ok_or(Error::InvalidOperation)?;
         let mut cursor = split_tree.cursor();
@@ -1186,7 +1198,8 @@ impl Buffer {
             let mut fragment_start = cursor.start::<CharacterCount>().0;
             let mut fragment_end = fragment_start + fragment.len();
 
-            let old_split_tree = self.insertion_splits
+            let old_split_tree = self
+                .insertion_splits
                 .remove(&fragment.insertion.id)
                 .unwrap();
             let mut splits_cursor = old_split_tree.cursor();
@@ -1469,7 +1482,8 @@ impl Buffer {
                 None
             };
 
-            let old_split_tree = self.insertion_splits
+            let old_split_tree = self
+                .insertion_splits
                 .remove(&fragment.insertion.id)
                 .unwrap();
             let mut cursor = old_split_tree.cursor();
@@ -1669,7 +1683,8 @@ impl Buffer {
                         &AnchorBias::Right => SeekBias::Right,
                     };
 
-                    let splits = self.insertion_splits
+                    let splits = self
+                        .insertion_splits
                         .get(&insertion_id)
                         .ok_or(Error::InvalidAnchor)?;
                     let mut splits_cursor = splits.cursor();
@@ -2135,7 +2150,8 @@ impl Text {
                 }
                 Ordering::Equal
             }
-        }).ok_or(Error::OffsetOutOfRange)?;
+        })
+        .ok_or(Error::OffsetOutOfRange)?;
 
         self.search(|probe| {
             if target_range.end >= probe.offset_range.start
@@ -2169,7 +2185,8 @@ impl Text {
                 }
                 Ordering::Equal
             }
-        }).ok_or(Error::OffsetOutOfRange)?;
+        })
+        .ok_or(Error::OffsetOutOfRange)?;
 
         Ok((longest_row, longest_row_len))
     }
@@ -2419,10 +2436,8 @@ impl Fragment {
     fn point_for_offset(&self, offset: usize) -> Result<Point, Error> {
         let text = &self.insertion.text;
         let offset_in_insertion = self.start_offset + offset;
-        Ok(
-            text.point_for_offset(offset_in_insertion)?
-                - &text.point_for_offset(self.start_offset)?,
-        )
+        Ok(text.point_for_offset(offset_in_insertion)?
+            - &text.point_for_offset(self.start_offset)?)
     }
 
     fn offset_for_point(&self, point: Point) -> Result<usize, Error> {
@@ -2437,11 +2452,13 @@ impl tree::Item for Fragment {
 
     fn summarize(&self) -> Self::Summary {
         if self.is_visible() {
-            let fragment_2d_start = self.insertion
+            let fragment_2d_start = self
+                .insertion
                 .text
                 .point_for_offset(self.start_offset)
                 .unwrap();
-            let fragment_2d_end = self.insertion
+            let fragment_2d_end = self
+                .insertion
                 .text
                 .point_for_offset(self.end_offset)
                 .unwrap();
@@ -2449,13 +2466,16 @@ impl tree::Item for Fragment {
             let first_row_len = if fragment_2d_start.row == fragment_2d_end.row {
                 (self.end_offset - self.start_offset) as u32
             } else {
-                let first_row_end = self.insertion
+                let first_row_end = self
+                    .insertion
                     .text
                     .offset_for_point(Point::new(fragment_2d_start.row + 1, 0))
-                    .unwrap() - 1;
+                    .unwrap()
+                    - 1;
                 (first_row_end - self.start_offset) as u32
             };
-            let (longest_row, longest_row_len) = self.insertion
+            let (longest_row, longest_row_len) = self
+                .insertion
                 .text
                 .longest_row_in_range(self.start_offset..self.end_offset)
                 .unwrap();
@@ -2600,11 +2620,13 @@ fn should_insert_before(
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     extern crate rand;
 
     use self::rand::{Rng, SeedableRng, StdRng};
     use super::*;
+    use cross_platform;
+    use fs::{tests::TestTree, LocalTree};
     use rpc;
     use std::time::Duration;
     use tokio_core::reactor;
@@ -2612,7 +2634,7 @@ mod tests {
 
     #[test]
     fn test_edit() {
-        let mut buffer = Buffer::new(0);
+        let mut buffer = Buffer::new(build_base_buffer_id());
         buffer.edit(&[0..0], "abc");
         assert_eq!(buffer.to_string(), "abc");
         buffer.edit(&[3..3], "def");
@@ -2629,11 +2651,13 @@ mod tests {
 
     #[test]
     fn test_random_edits() {
+        let buffer_id = build_base_buffer_id();
+
         for seed in 0..100 {
             println!("{:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
-            let mut buffer = Buffer::new(0);
+            let mut buffer = Buffer::new(buffer_id);
             let mut reference_string = String::new();
 
             for _i in 0..10 {
@@ -2657,7 +2681,8 @@ mod tests {
                         &reference_string[0..old_range.start],
                         new_text.as_str(),
                         &reference_string[old_range.end..],
-                    ].concat();
+                    ]
+                    .concat();
                 }
                 assert_eq!(buffer.to_string(), reference_string);
             }
@@ -2666,7 +2691,7 @@ mod tests {
 
     #[test]
     fn test_len_for_row() {
-        let mut buffer = Buffer::new(0);
+        let mut buffer = Buffer::new(build_base_buffer_id());
         buffer.edit(&[0..0], "abcd\nefg\nhij");
         buffer.edit(&[12..12], "kl\nmno");
         buffer.edit(&[18..18], "\npqrs\n");
@@ -2683,7 +2708,7 @@ mod tests {
 
     #[test]
     fn test_longest_row() {
-        let mut buffer = Buffer::new(0);
+        let mut buffer = Buffer::new(build_base_buffer_id());
         assert_eq!(buffer.longest_row(), 0);
         buffer.edit(&[0..0], "abcd\nefg\nhij");
         assert_eq!(buffer.longest_row(), 0);
@@ -2699,7 +2724,7 @@ mod tests {
 
     #[test]
     fn iter_starting_at_point() {
-        let mut buffer = Buffer::new(0);
+        let mut buffer = Buffer::new(build_base_buffer_id());
         buffer.edit(&[0..0], "abcd\nefgh\nij");
         buffer.edit(&[12..12], "kl\nmno");
         buffer.edit(&[18..18], "\npqrs");
@@ -2739,7 +2764,7 @@ mod tests {
         assert_eq!(String::from_utf16_lossy(&iter.collect::<Vec<u16>>()), "");
 
         // Regression test:
-        let mut buffer = Buffer::new(0);
+        let mut buffer = Buffer::new(build_base_buffer_id());
         buffer.edit(&[0..0], "[workspace]\nmembers = [\n    \"xray_core\",\n    \"xray_server\",\n    \"xray_cli\",\n    \"xray_wasm\",\n]\n");
         buffer.edit(&[60..60], "\n");
 
@@ -2752,7 +2777,7 @@ mod tests {
 
     #[test]
     fn backward_iter_starting_at_point() {
-        let mut buffer = Buffer::new(0);
+        let mut buffer = Buffer::new(build_base_buffer_id());
         buffer.edit(&[0..0], "abcd\nefgh\nij");
         buffer.edit(&[12..12], "kl\nmno");
         buffer.edit(&[18..18], "\npqrs");
@@ -2911,7 +2936,7 @@ mod tests {
 
     #[test]
     fn test_anchors() {
-        let mut buffer = Buffer::new(0);
+        let mut buffer = Buffer::new(build_base_buffer_id());
         buffer.edit(&[0..0], "abc");
         let left_anchor = buffer.anchor_before_offset(2).unwrap();
         let right_anchor = buffer.anchor_after_offset(2).unwrap();
@@ -3053,7 +3078,7 @@ mod tests {
 
     #[test]
     fn anchors_at_start_and_end() {
-        let mut buffer = Buffer::new(0);
+        let mut buffer = Buffer::new(build_base_buffer_id());
         let before_start_anchor = buffer.anchor_before_offset(0).unwrap();
         let after_end_anchor = buffer.anchor_after_offset(0).unwrap();
 
@@ -3076,7 +3101,7 @@ mod tests {
 
     #[test]
     fn test_clip_point() {
-        let mut buffer = Buffer::new(0);
+        let mut buffer = Buffer::new(build_base_buffer_id());
         buffer.edit(&[0..0], "abcdefghi");
 
         let point = buffer.clip_point(Point::new(0, 0));
@@ -3094,7 +3119,7 @@ mod tests {
 
     #[test]
     fn test_snapshot() {
-        let mut buffer = Buffer::new(0);
+        let mut buffer = Buffer::new(build_base_buffer_id());
         buffer.edit(&[0..0], "abcdefghi");
         buffer.edit(&[3..6], "DEF");
 
@@ -3118,7 +3143,7 @@ mod tests {
             let mut buffers = Vec::new();
             let mut queues = Vec::new();
             for i in site_range.clone() {
-                let mut buffer = Buffer::new(0);
+                let mut buffer = Buffer::new(build_base_buffer_id());
                 buffer.replica_id = i + 1;
                 buffers.push(buffer);
                 queues.push(Vec::new());
@@ -3171,7 +3196,7 @@ mod tests {
 
     #[test]
     fn test_edit_replication() {
-        let local_buffer = Buffer::new(0).into_shared();
+        let local_buffer = Buffer::new(build_base_buffer_id()).into_shared();
         local_buffer.borrow_mut().edit(&[0..0], "abcdef");
         local_buffer.borrow_mut().edit(&[2..4], "ghi");
 
@@ -3223,7 +3248,7 @@ mod tests {
     fn test_selection_replication() {
         use stream_ext::StreamExt;
 
-        let mut buffer_1 = Buffer::new(0);
+        let mut buffer_1 = Buffer::new(build_base_buffer_id());
         buffer_1.edit(&[0..0], "abcdef");
         let sels = vec![empty_selection(&buffer_1, 1), empty_selection(&buffer_1, 3)];
         buffer_1.add_selection_set(0, sels);
@@ -3236,13 +3261,15 @@ mod tests {
         let buffer_2 = Buffer::remote(
             foreground.clone(),
             rpc::tests::connect(&mut reactor, super::rpc::Service::new(buffer_1.clone())),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(selections(&buffer_1), selections(&buffer_2));
 
         let buffer_3 = Buffer::remote(
             foreground,
             rpc::tests::connect(&mut reactor, super::rpc::Service::new(buffer_1.clone())),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(selections(&buffer_1), selections(&buffer_3));
 
         let mut buffer_1_updates = buffer_1.borrow().updates();
@@ -3361,5 +3388,33 @@ mod tests {
             reversed: false,
             goal_column: None,
         }
+    }
+
+    fn build_tree() -> TestTree {
+        TestTree::from_json(
+            "/Users/someone/tree",
+            json!({
+                "root-1": {
+                    "file-1": null,
+                    "subdir-1": {
+                        "file-1": null,
+                        "file-2": null,
+                    }
+                },
+                "root-2": {
+                    "subdir-2": {
+                        "file-3": null,
+                        "file-4": null,
+                    }
+                }
+            }),
+        )
+    }
+
+    pub fn build_base_buffer_id() -> BufferId {
+        let tree = build_tree();
+        tree.open_buffer(&cross_platform::Path::from("root-1/file-1"))
+            .wait()
+            .unwrap()
     }
 }

@@ -122,7 +122,8 @@ impl App {
             next_window_id: 1,
             windows: HashMap::new(),
             updates: NotifyCell::new(()),
-        }.into_shared();
+        }
+        .into_shared();
 
         let app_clone = app.clone();
         foreground
@@ -153,8 +154,7 @@ impl App {
     }
 
     pub fn open_local_workspace<T: 'static + fs::LocalTree>(&mut self, roots: Vec<T>) {
-        let file_provider = self.file_provider.clone();
-        let workspace = LocalWorkspace::new(LocalProject::new(file_provider, roots)).into_shared();
+        let workspace = LocalWorkspace::new(LocalProject::new(roots)).into_shared();
         self.add_workspace(WorkspaceEntry::Local(workspace.clone()));
         self.open_workspace_window(workspace);
     }
@@ -177,7 +177,8 @@ impl App {
             let window_id = self.next_window_id;
             self.next_window_id += 1;
             self.windows.insert(window_id, window);
-            if self.commands_tx
+            if self
+                .commands_tx
                 .unbounded_send(Command::OpenWindow(window_id))
                 .is_err()
             {
@@ -208,7 +209,7 @@ impl App {
             None => unimplemented!(),
         };
     }
-    
+
     pub fn close_window(&mut self, window_id: WindowId) -> Result<(), ()> {
         self.windows.remove(&window_id).map(|_| ()).ok_or(())
     }
@@ -344,11 +345,13 @@ impl Peer {
         &self,
     ) -> Box<Future<Item = Option<RemoteWorkspace>, Error = WorkspaceOpenError>> {
         match self.service.latest_state() {
-            Ok(state) => if let Some(workspace_id) = state.workspace_ids.first() {
-                self.open_workspace(*workspace_id)
-            } else {
-                Box::new(future::ok(None))
-            },
+            Ok(state) => {
+                if let Some(workspace_id) = state.workspace_ids.first() {
+                    self.open_workspace(*workspace_id)
+                } else {
+                    Box::new(future::ok(None))
+                }
+            }
             Err(error) => Box::new(future::err(error.into())),
         }
     }

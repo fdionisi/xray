@@ -5,6 +5,7 @@ extern crate bytes;
 #[macro_use]
 extern crate lazy_static;
 extern crate futures;
+extern crate memo_core;
 extern crate parking_lot;
 extern crate seahash;
 extern crate serde;
@@ -17,6 +18,8 @@ extern crate smallvec;
 extern crate tokio_core;
 #[cfg(test)]
 extern crate tokio_timer;
+#[cfg(test)]
+extern crate uuid;
 #[cfg(target_arch = "wasm32")]
 extern crate wasm_bindgen;
 

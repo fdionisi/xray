@@ -9,6 +9,7 @@ bincode = "1.0"
 bytes = { version ="0.4", features = ["serde"] }
 futures = "0.1"
 lazy_static = "1.0"
+memo_core = { path = "../memo_core" }
 parking_lot = "0.5"
 seahash = "3.0"
 serde = "1.0"
@@ -25,6 +26,7 @@ futures-cpupool = "0.1"
 tokio-core = "0.1"
 tokio-timer = "0.2"
 criterion = "0.2"
+uuid = { version = "0.7", features = ["serde", "u128"] }
 
 [[bench]]
 name = "bench"

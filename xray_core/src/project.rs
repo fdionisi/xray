@@ -6,7 +6,7 @@ use fuzzy;
 use never::Never;
 use notify_cell::{NotifyCell, NotifyCellObserver, WeakNotifyCell};
 use rpc;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::cmp;
 use std::collections::{BinaryHeap, HashMap};
 use std::error;
@@ -41,9 +41,7 @@ struct BufferWeakSet {
 }
 
 pub struct LocalProject {
-    file_provider: Rc<fs::FileProvider>,
     next_tree_id: TreeId,
-    next_buffer_id: Rc<Cell<BufferId>>,
     trees: HashMap<TreeId, Rc<fs::LocalTree>>,
     buffers: Rc<RefCell<BufferWeakSet>>,
 }
@@ -171,14 +169,12 @@ impl BufferWeakSet {
 }
 
 impl LocalProject {
-    pub fn new<T>(file_provider: Rc<fs::FileProvider>, trees: Vec<T>) -> Self
+    pub fn new<T>(trees: Vec<T>) -> Self
     where
         T: 'static + fs::LocalTree,
     {
         let mut project = LocalProject {
-            file_provider,
             next_tree_id: 0,
-            next_buffer_id: Rc::new(Cell::new(0)),
             trees: HashMap::new(),
             buffers: Rc::new(RefCell::new(BufferWeakSet::new())),
         };
@@ -193,18 +189,6 @@ impl LocalProject {
         self.next_tree_id += 1;
         self.trees.insert(id, Rc::new(tree));
     }
-
-    fn resolve_path(
-        &self,
-        tree_id: TreeId,
-        relative_path: &cross_platform::Path,
-    ) -> Option<cross_platform::Path> {
-        self.trees.get(&tree_id).map(|tree| {
-            let mut absolute_path = tree.path().clone();
-            absolute_path.push_path(relative_path);
-            absolute_path
-        })
-    }
 }
 
 impl Project for LocalProject {
@@ -213,13 +197,13 @@ impl Project for LocalProject {
         tree_id: TreeId,
         relative_path: &cross_platform::Path,
     ) -> Box<Future<Item = Rc<RefCell<Buffer>>, Error = Error>> {
-        if let Some(absolute_path) = self.resolve_path(tree_id, relative_path) {
-            let next_buffer_id_cell = self.next_buffer_id.clone();
+        if let Some(tree) = self.trees.get(&tree_id) {
+            let tree = tree.clone();
             let buffers = self.buffers.clone();
             Box::new(
-                self.file_provider
-                    .open(&absolute_path)
-                    .and_then(move |file| {
+                tree.open_file(&relative_path)
+                    .join(tree.open_buffer(&relative_path))
+                    .and_then(move |(file, buffer_id)| {
                         let buffer = buffers.borrow_mut().find_by_file_id(file.id());
                         if let Some(buffer) = buffer {
                             Box::new(future::ok(buffer))
@@ -230,8 +214,6 @@ impl Project for LocalProject {
                                 if let Some(buffer) = buffer {
                                     Ok(buffer)
                                 } else {
-                                    let buffer_id = next_buffer_id_cell.get();
-                                    next_buffer_id_cell.set(next_buffer_id_cell.get() + 1);
                                     let mut buffer = Buffer::new(buffer_id);
                                     buffer.edit(&[0..0], content.as_str());
                                     buffer.set_file(file);
@@ -732,7 +714,7 @@ mod tests {
     #[test]
     fn test_open_same_path_concurrently() {
         let file_provider = Rc::new(TestFileProvider::new());
-        let project = build_project(file_provider.clone());
+        let project = build_project();
 
         let tree_id = 0;
         let relative_path = cross_platform::Path::from("subdir-a/subdir-1/bar");
@@ -750,7 +732,7 @@ mod tests {
     #[test]
     fn test_drop_buffer_rc() {
         let file_provider = Rc::new(TestFileProvider::new());
-        let project = build_project(file_provider.clone());
+        let project = build_project();
 
         let tree_id = 0;
         let relative_path = cross_platform::Path::from("subdir-a/subdir-1/bar");
@@ -794,7 +776,7 @@ mod tests {
                 }
             }),
         );
-        let project = LocalProject::new(Rc::new(TestFileProvider::new()), vec![tree]);
+        let project = LocalProject::new(vec![tree]);
         let (mut search, observer) = project.search_paths("sub2", 10, true);
 
         assert_eq!(search.poll(), Ok(Async::Ready(())));
@@ -825,7 +807,7 @@ mod tests {
 
     #[test]
     fn test_search_many_trees() {
-        let project = build_project(Rc::new(TestFileProvider::new()));
+        let project = build_project();
 
         let (mut search, observer) = project.search_paths("bar", 10, true);
         assert_eq!(search.poll(), Ok(Async::Ready(())));
@@ -866,11 +848,12 @@ mod tests {
         let handle = Rc::new(reactor.handle());
         let file_provider = Rc::new(TestFileProvider::new());
 
-        let local_project = build_project(file_provider.clone()).into_shared();
+        let local_project = build_project().into_shared();
         let remote_project = RemoteProject::new(
             handle,
             rpc::tests::connect(&mut reactor, ProjectService::new(local_project.clone())),
-        ).unwrap();
+        )
+        .unwrap();
 
         let (mut local_search, local_observer) =
             local_project.borrow().search_paths("bar", 10, true);
@@ -911,7 +894,21 @@ mod tests {
         );
     }
 
-    fn build_project(file_provider: Rc<TestFileProvider>) -> LocalProject {
+    impl LocalProject {
+        fn resolve_path(
+            &self,
+            tree_id: TreeId,
+            relative_path: &cross_platform::Path,
+        ) -> Option<cross_platform::Path> {
+            self.trees.get(&tree_id).map(|tree| {
+                let mut absolute_path = tree.path().clone();
+                absolute_path.push_path(relative_path);
+                absolute_path
+            })
+        }
+    }
+
+    fn build_project() -> LocalProject {
         let tree_1 = TestTree::from_json(
             "/Users/someone/foo",
             json!({
@@ -939,7 +936,7 @@ mod tests {
         );
         tree_2.populated.set(true);
 
-        LocalProject::new(file_provider, vec![tree_1, tree_2])
+        LocalProject::new(vec![tree_1, tree_2])
     }
 
     fn summarize_results(

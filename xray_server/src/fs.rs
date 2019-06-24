@@ -22,6 +22,7 @@ use xray_core::notify_cell::NotifyCell;
 pub struct Tree {
     path: cross_platform::Path,
     work_tree: WorkTree,
+    root: xray_fs::Entry,
     database: Rc<RefCell<database::Database>>,
     updates: NotifyCell<()>,
     populated: NotifyCell<bool>,
@@ -51,10 +52,18 @@ impl Tree {
             WorkTree::new(uuid::Uuid::new_v4(), Some(git.head()), start_ops, git, None).unwrap();
 
         let populated = NotifyCell::new(false);
-        Self::populate(ops, database.clone(), populated.clone());
+        Self::populate(
+            ops,
+            &work_tree,
+            root.clone(),
+            database.clone(),
+            updates.clone(),
+            populated.clone(),
+        );
 
         Ok(Self {
             path: cross_platform::Path::from(path.into_os_string()),
+            root,
             work_tree,
             database,
             updates,
@@ -64,7 +73,10 @@ impl Tree {
 
     fn populate(
         ops: Box<(dyn Stream<Error = memo_core::Error, Item = memo_core::OperationEnvelope>)>,
+        work_tree: &WorkTree,
+        root: xray_fs::Entry,
         database: Rc<RefCell<database::Database>>,
+        updates: NotifyCell<()>,
         populated: NotifyCell<bool>,
     ) {
         // TODO: make asyncrhonous
@@ -73,23 +85,9 @@ impl Tree {
             .map(|envelope| database.borrow_mut().add(envelope.unwrap()))
             .collect::<Vec<()>>();
 
-        populated.set(true);
-    }
-}
-
-impl xray_fs::Tree for Tree {
-    fn root(&self) -> xray_fs::Entry {
-        let root_file_name = OsString::from(
-            self.path
-                .to_path_buf()
-                .file_name()
-                .expect("Path must have a filename"),
-        );
-
-        let root = xray_fs::Entry::dir(root_file_name.into(), false, false);
         let mut stack = vec![root];
 
-        self.work_tree.with_cursor(|cursor| loop {
+        work_tree.with_cursor(|cursor| loop {
             let entry = cursor.entry().unwrap();
 
             if entry.status != memo_core::FileStatus::Removed {
@@ -113,6 +111,7 @@ impl xray_fs::Tree for Tree {
                         stack.last_mut().unwrap().insert(file).unwrap();
                     }
                 }
+                updates.set(())
             }
 
             if !cursor.next(true) {
@@ -120,9 +119,13 @@ impl xray_fs::Tree for Tree {
             }
         });
 
-        let root = stack.first().unwrap();
+        populated.set(true);
+    }
+}
 
-        root.clone()
+impl xray_fs::Tree for Tree {
+    fn root(&self) -> xray_fs::Entry {
+        self.root.clone()
     }
 
     fn updates(&self) -> Box<Stream<Item = (), Error = ()>> {
@@ -139,8 +142,41 @@ impl xray_fs::LocalTree for Tree {
         Box::new(futures::future::ok(()))
     }
 
-    fn as_tree(&self) -> &xray_fs::Tree {
-        self
+    fn open_file(
+        &self,
+        relative_path: &cross_platform::Path,
+    ) -> Box<Future<Item = Box<xray_fs::File>, Error = io::Error>> {
+        let mut path = self.path.clone();
+        path.push_path(relative_path);
+        let path = path.to_path_buf();
+
+        let (tx, rx) = futures::sync::oneshot::channel();
+
+        thread::spawn(|| {
+            fn open(path: PathBuf) -> Result<File, io::Error> {
+                Ok(File::new(
+                    fs::OpenOptions::new().read(true).write(true).open(path)?,
+                )?)
+            }
+
+            let _ = tx.send(open(path));
+        });
+
+        Box::new(
+            rx.then(|result| result.expect("Sender should not be dropped"))
+                .map(|file| Box::new(file) as Box<xray_fs::File>),
+        )
+    }
+
+    fn open_buffer(
+        &self,
+        path: &cross_platform::Path,
+    ) -> Box<Future<Item = memo_core::BufferId, Error = io::Error>> {
+        Box::new(
+            self.work_tree
+                .open_text_file(path.to_path_buf())
+                .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{}", err))),
+        )
     }
 }
 

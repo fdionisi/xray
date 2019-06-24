@@ -25,7 +25,15 @@ pub trait Tree {
 pub trait LocalTree: Tree {
     fn path(&self) -> &cross_platform::Path;
     fn populated(&self) -> Box<Future<Item = (), Error = ()>>;
-    fn as_tree(&self) -> &Tree;
+    // Buffer data
+    fn open_file(
+        &self,
+        relative_path: &cross_platform::Path,
+    ) -> Box<Future<Item = Box<File>, Error = io::Error>>;
+    fn open_buffer(
+        &self,
+        relative_path: &cross_platform::Path,
+    ) -> Box<Future<Item = memo_core::BufferId, Error = io::Error>>;
 }
 
 pub trait FileProvider {
@@ -44,7 +52,10 @@ pub trait File {
 pub enum Entry {
     #[serde(serialize_with = "serialize_dir", deserialize_with = "deserialize_dir")]
     Dir(Arc<DirInner>),
-    #[serde(serialize_with = "serialize_file", deserialize_with = "deserialize_file")]
+    #[serde(
+        serialize_with = "serialize_file",
+        deserialize_with = "deserialize_file"
+    )]
     File(Arc<FileInner>),
 }
 
@@ -294,16 +305,19 @@ impl Tree for RemoteTree {
 pub(crate) mod tests {
     use super::*;
     use bincode::{deserialize, serialize};
+    use buffer::BufferId;
     use cross_platform::PathComponent;
-    use futures::{future, task, Async, IntoFuture, Poll};
+    use futures::{future, stream, task, Async, IntoFuture, Poll};
+    use memo_core::{DirEntry, FileType, GitProvider, Oid, Operation, WorkTree};
     use never::Never;
     use notify_cell::NotifyCell;
     use rpc;
     use std::collections::HashMap;
     use std::ffi::OsString;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use stream_ext::StreamExt;
     use tokio_core::reactor;
+    use uuid::Uuid;
 
     #[test]
     fn test_insert() {
@@ -380,9 +394,23 @@ pub(crate) mod tests {
         assert_eq!(remote_tree.root(), local_tree.root());
     }
 
+    #[derive(Clone)]
+    pub struct TestEntry {
+        dir_entry: DirEntry,
+        text: Option<String>,
+    }
+
+    pub struct TestGitProvider {
+        commits: RefCell<HashMap<Oid, Vec<TestEntry>>>,
+        text: RefCell<HashMap<Oid, HashMap<PathBuf, String>>>,
+        next_oid: RefCell<u64>,
+    }
+
     pub struct TestTree {
         path: cross_platform::Path,
         root: Entry,
+        work_tree: WorkTree,
+        file_state: Rc<RefCell<TestFileProviderState>>,
         pub populated: NotifyCell<bool>,
     }
 
@@ -403,11 +431,109 @@ pub(crate) mod tests {
 
     struct NextTick(bool);
 
+    impl TestGitProvider {
+        fn new() -> Self {
+            TestGitProvider {
+                commits: RefCell::new(HashMap::new()),
+                text: RefCell::new(HashMap::new()),
+                next_oid: RefCell::new(0),
+            }
+        }
+
+        fn commit(&self, oid: Oid, entries: Vec<TestEntry>) {
+            self.commits.borrow_mut().insert(oid, entries.clone());
+
+            let mut text_by_path = HashMap::new();
+            let mut path = vec![];
+            for entry in entries.clone() {
+                let entry = entry;
+                let dir_entry = entry.dir_entry;
+                path.truncate(dir_entry.depth - 1);
+                path.push(dir_entry.name.into_string().unwrap());
+                if dir_entry.file_type == FileType::Text {
+                    text_by_path.insert(
+                        PathBuf::from(path.join("/")),
+                        entry.text.unwrap_or(String::from("")),
+                    );
+                }
+            }
+            self.text.borrow_mut().insert(oid, text_by_path);
+        }
+
+        fn gen_oid(&self) -> Oid {
+            let mut next_oid = self.next_oid.borrow_mut();
+            let mut oid = [0; 20];
+            oid[0] = (*next_oid >> 0) as u8;
+            oid[1] = (*next_oid >> 8) as u8;
+            oid[2] = (*next_oid >> 16) as u8;
+            oid[3] = (*next_oid >> 24) as u8;
+            oid[4] = (*next_oid >> 32) as u8;
+            oid[5] = (*next_oid >> 40) as u8;
+            oid[6] = (*next_oid >> 48) as u8;
+            oid[7] = (*next_oid >> 56) as u8;
+            *next_oid += 1;
+            oid
+        }
+    }
+
+    impl GitProvider for TestGitProvider {
+        fn base_entries(&self, oid: Oid) -> Box<dyn Stream<Item = DirEntry, Error = io::Error>> {
+            match self.commits.borrow().get(&oid) {
+                Some(ref entries) => {
+                    let entries = entries
+                        .iter()
+                        .map(|entry| entry.dir_entry.clone())
+                        .collect::<Vec<DirEntry>>();
+                    Box::new(stream::iter_ok(entries))
+                }
+                None => Box::new(stream::once(Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Commit does not exist",
+                )))),
+            }
+        }
+
+        fn base_text(
+            &self,
+            oid: Oid,
+            path: &Path,
+        ) -> Box<dyn Future<Item = String, Error = io::Error>> {
+            use futures::future;
+            Box::new(future::ok(String::from(
+                self.text
+                    .borrow()
+                    .get(&oid)
+                    .and_then(|text_by_path| text_by_path.get(&path.to_path_buf()))
+                    .unwrap()
+                    .clone(),
+            )))
+        }
+    }
+
     impl TestTree {
         pub fn new<T: Into<OsString>>(path: T, root: Entry) -> Self {
+            let (work_tree, ops) = WorkTree::new(
+                Uuid::from_u128(999 as u128),
+                None,
+                Vec::new(),
+                Rc::new(TestGitProvider::new()),
+                None,
+            )
+            .unwrap();
+
+            let _ = ops
+                .wait()
+                .map(|op| op.unwrap().operation)
+                .collect::<Vec<Operation>>();
+
             Self {
                 path: cross_platform::Path::from(path.into()),
                 root,
+                work_tree,
+                file_state: Rc::new(RefCell::new(TestFileProviderState {
+                    next_file_id: 0,
+                    files: HashMap::new(),
+                })),
                 populated: NotifyCell::new(false),
             }
         }
@@ -415,7 +541,45 @@ pub(crate) mod tests {
         pub fn from_json<T: Into<PathBuf>>(path: T, json: serde_json::Value) -> Self {
             let path = path.into();
             let root = Entry::from_json(PathComponent::from(path.file_name().unwrap()), &json);
-            Self::new(path, root)
+            let test_tree = Self::new(path, root.clone());
+
+            Self::populate_work_tree(&test_tree, &root);
+
+            test_tree
+        }
+
+        fn populate_work_tree(tree: &TestTree, root: &Entry) {
+            let root_file_name = root.name();
+            let root_path = root_file_name.to_string_lossy();
+            let root_path = String::from_utf8(root_path.as_bytes().to_vec()).unwrap();
+            let root_path = PathBuf::from(root_path);
+            let _ = root
+                .children()
+                .unwrap()
+                .iter()
+                .map(|entry| {
+                    let forward_entry = entry.clone();
+                    let mut base_path = root_path.to_path_buf();
+
+                    let file_name = entry.name();
+                    let file_path = file_name.to_string_lossy();
+                    let file_path = String::from_utf8(file_path.as_bytes().to_vec()).unwrap();
+                    let file_path = PathBuf::from(file_path);
+
+                    base_path.push(file_path);
+
+                    if entry.is_dir() {
+                        tree.work_tree
+                            .create_file(base_path, FileType::Directory)
+                            .unwrap();
+                        Self::populate_work_tree(&tree, &forward_entry);
+                    } else {
+                        tree.work_tree
+                            .create_file(base_path, FileType::Text)
+                            .unwrap();
+                    }
+                })
+                .collect::<Vec<()>>();
         }
     }
 
@@ -448,8 +612,32 @@ pub(crate) mod tests {
             }
         }
 
-        fn as_tree(&self) -> &Tree {
-            self
+        fn open_file(
+            &self,
+            relative_path: &cross_platform::Path,
+        ) -> Box<Future<Item = Box<File>, Error = io::Error>> {
+            let path = relative_path.to_path_buf();
+            let state = self.file_state.clone();
+            Box::new(NextTick::new().then(move |_| {
+                let state = state.borrow();
+                state
+                    .files
+                    .get(&path)
+                    .map(|file| Box::new(file.clone()) as Box<File>)
+                    .ok_or(io::Error::new(io::ErrorKind::NotFound, "Path not found"))
+                    .into_future()
+            }))
+        }
+
+        fn open_buffer(
+            &self,
+            relative_path: &cross_platform::Path,
+        ) -> Box<Future<Item = BufferId, Error = io::Error>> {
+            Box::new(
+                self.work_tree
+                    .open_text_file(relative_path.to_path_buf())
+                    .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{}", err))),
+            )
         }
     }
 
@@ -483,7 +671,8 @@ pub(crate) mod tests {
 
     impl PartialEq for Entry {
         fn eq(&self, other: &Self) -> bool {
-            self.name() == other.name() && self.name_chars() == other.name_chars()
+            self.name() == other.name()
+                && self.name_chars() == other.name_chars()
                 && self.is_dir() == other.is_dir()
                 && self.is_ignored() == other.is_ignored()
                 && self.children() == other.children()
