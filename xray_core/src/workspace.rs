@@ -1,20 +1,21 @@
-use buffer::{self, Buffer, BufferId};
+use std::cell::{Ref, RefCell, RefMut};
+use std::rc::Rc;
+
+use futures::{Future, Poll, Stream};
+use serde_json;
+
+use buffer::BufferEntry;
 use buffer_view::{BufferView, BufferViewDelegate};
 use cross_platform;
 use file_finder::{FileFinderView, FileFinderViewDelegate};
-use futures::{Future, Poll, Stream};
 use never::Never;
-use notify_cell::NotifyCell;
-use notify_cell::NotifyCellObserver;
+use notify_cell::{NotifyCell, NotifyCellObserver};
 use project::{
     self, LocalProject, PathSearch, PathSearchStatus, Project, ProjectService, RemoteProject,
     TreeId,
 };
 use rpc::{self, client, server};
-use serde_json;
-use std::cell::{Ref, RefCell, RefMut};
-use std::ops::Range;
-use std::rc::Rc;
+
 use window::{View, ViewHandle, WeakViewHandle, WeakWindowHandle, Window};
 use ForegroundExecutor;
 use IntoShared;
@@ -59,11 +60,11 @@ pub struct WorkspaceView {
     window_handle: Option<WeakWindowHandle>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Anchor {
-    buffer_id: BufferId,
-    range: Range<buffer::Anchor>,
-}
+// #[derive(Clone, Serialize, Deserialize)]
+// pub struct Anchor {
+//     buffer_id: BufferId,
+//     range: Range<buffer::Anchor>,
+// }
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
@@ -178,7 +179,7 @@ impl WorkspaceView {
 
     fn open_buffer<T>(&self, buffer: T)
     where
-        T: 'static + Future<Item = Rc<RefCell<Buffer>>, Error = project::Error>,
+        T: 'static + Future<Item = BufferEntry, Error = project::Error>,
     {
         if let Some(window_handle) = self.window_handle.clone() {
             let user_id = self.workspace.borrow().user_id();
@@ -186,7 +187,7 @@ impl WorkspaceView {
             self.foreground
                 .execute(Box::new(buffer.then(move |result| {
                     window_handle.map(|window| match result {
-                        Ok(buffer) => {
+                        Ok(BufferEntry::Local(buffer)) => {
                             if let Some(view_handle) = view_handle {
                                 let mut buffer_view =
                                     BufferView::new(buffer, user_id, Some(view_handle.clone()));
@@ -199,6 +200,9 @@ impl WorkspaceView {
                                     view.updates.set(());
                                 });
                             }
+                        }
+                        Ok(BufferEntry::Remote(_)) => {
+                            panic!("workspaces can open remote buffers too...")
                         }
                         Err(error) => {
                             eprintln!("Error opening buffer {:?}", error);

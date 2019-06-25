@@ -44,7 +44,6 @@ mod never;
 mod project;
 #[cfg(test)]
 mod stream_ext;
-mod tree;
 
 pub use app::{App, WindowId};
 use futures::future::{Executor, Future};

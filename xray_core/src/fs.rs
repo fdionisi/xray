@@ -1,17 +1,20 @@
-use buffer::BufferSnapshot;
-use cross_platform;
-use futures::{Async, Future, Stream};
-use notify_cell::NotifyCell;
-use parking_lot::RwLock;
-use rpc::{client, server};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-#[cfg(test)]
-use serde_json;
 use std::cell::RefCell;
 use std::io;
 use std::iter::Iterator;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
+
+use futures::{Async, Future, Stream};
+use parking_lot::RwLock;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+#[cfg(test)]
+use serde_json;
+
+use buffer::BufferId;
+use cross_platform;
+use notify_cell::NotifyCell;
+use rpc::{client, server};
 use ForegroundExecutor;
 
 pub type EntryId = usize;
@@ -25,7 +28,9 @@ pub trait Tree {
 pub trait LocalTree: Tree {
     fn path(&self) -> &cross_platform::Path;
     fn populated(&self) -> Box<Future<Item = (), Error = ()>>;
-    // Buffer data
+    fn as_tree(&self) -> &Tree;
+
+    // Tree actions
     fn open_file(
         &self,
         relative_path: &cross_platform::Path,
@@ -33,7 +38,55 @@ pub trait LocalTree: Tree {
     fn open_buffer(
         &self,
         relative_path: &cross_platform::Path,
-    ) -> Box<Future<Item = memo_core::BufferId, Error = io::Error>>;
+    ) -> Box<Future<Item = BufferId, Error = io::Error>>;
+
+    // Buffer data
+    fn max_point(&self, buffer_id: BufferId) -> memo_core::Point;
+    fn clip_point(&self, buffer_id: BufferId, original: memo_core::Point) -> memo_core::Point;
+    fn longest_row(&self, buffer_id: BufferId) -> u32;
+    fn line(&self, buffer_id: BufferId, row: u32) -> Vec<u16>;
+    fn len_for_row(&self, buffer_id: BufferId, row: u32) -> u32;
+    fn iter_at_point(
+        &self,
+        buffer_id: BufferId,
+        point: memo_core::Point,
+    ) -> Box<Iterator<Item = u16>>;
+    fn backward_iter_at_point(
+        &self,
+        buffer_id: BufferId,
+        point: memo_core::Point,
+    ) -> Box<Iterator<Item = u16>>;
+    fn len(&self, buffer_id: BufferId) -> usize;
+
+    // Buffer actions
+    fn text(&self, buffer_id: BufferId) -> Box<Future<Item = Vec<u16>, Error = io::Error>>;
+    fn edit(
+        &self,
+        buffer_id: BufferId,
+        ranges: Vec<Range<memo_core::Point>>,
+        text: String,
+    ) -> Box<Future<Item = (), Error = io::Error>>;
+    fn add_selection_set(
+        &self,
+        buffer_id: BufferId,
+        ranges: Vec<Range<memo_core::Point>>,
+    ) -> Box<Future<Item = memo_core::LocalSelectionSetId, Error = io::Error>>;
+    fn replace_selection_set(
+        &self,
+        buffer_id: BufferId,
+        selection_set_id: memo_core::LocalSelectionSetId,
+        ranges: Vec<Range<memo_core::Point>>,
+    ) -> Box<Future<Item = (), Error = io::Error>>;
+    fn remove_selection_set(
+        &self,
+        buffer_id: BufferId,
+        selection_set_id: memo_core::LocalSelectionSetId,
+    ) -> Box<Future<Item = (), Error = io::Error>>;
+    // Selections
+    fn selection_ranges(
+        &self,
+        buffer_id: BufferId,
+    ) -> Result<memo_core::BufferSelectionRanges, io::Error>;
 }
 
 pub trait FileProvider {
@@ -44,8 +97,10 @@ pub trait FileProvider {
 pub trait File {
     fn id(&self) -> FileId;
     fn read(&self) -> Box<Future<Item = String, Error = io::Error>>;
-    fn write_snapshot(&self, snapshot: BufferSnapshot)
-        -> Box<Future<Item = (), Error = io::Error>>;
+    fn write_text(
+        &self,
+        text: Box<Future<Item = Vec<u16>, Error = io::Error>>,
+    ) -> Box<Future<Item = (), Error = io::Error>>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -612,6 +667,10 @@ pub(crate) mod tests {
             }
         }
 
+        fn as_tree(&self) -> &Tree {
+            self
+        }
+
         fn open_file(
             &self,
             relative_path: &cross_platform::Path,
@@ -638,6 +697,128 @@ pub(crate) mod tests {
                     .open_text_file(relative_path.to_path_buf())
                     .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{}", err))),
             )
+        }
+
+        fn max_point(&self, buffer_id: BufferId) -> memo_core::Point {
+            self.work_tree.max_point(buffer_id).unwrap()
+        }
+
+        fn clip_point(&self, buffer_id: BufferId, original: memo_core::Point) -> memo_core::Point {
+            self.work_tree.clip_point(buffer_id, original).unwrap()
+        }
+
+        fn longest_row(&self, buffer_id: BufferId) -> u32 {
+            self.work_tree.longest_row(buffer_id).unwrap()
+        }
+
+        fn line(&self, buffer_id: BufferId, row: u32) -> Vec<u16> {
+            self.work_tree.line(buffer_id, row).unwrap()
+        }
+
+        fn len_for_row(&self, buffer_id: BufferId, row: u32) -> u32 {
+            self.work_tree.len_for_row(buffer_id, row).unwrap()
+        }
+
+        fn iter_at_point(
+            &self,
+            buffer_id: BufferId,
+            point: memo_core::Point,
+        ) -> Box<Iterator<Item = u16>> {
+            Box::new(self.work_tree.iter_at_point(buffer_id, point).unwrap())
+        }
+
+        fn backward_iter_at_point(
+            &self,
+            buffer_id: BufferId,
+            point: memo_core::Point,
+        ) -> Box<Iterator<Item = u16>> {
+            Box::new(
+                self.work_tree
+                    .iter_at_point(buffer_id, point)
+                    .unwrap()
+                    .rev(),
+            )
+        }
+
+        fn len(&self, buffer_id: BufferId) -> usize {
+            self.work_tree.len(buffer_id).unwrap()
+        }
+
+        fn text(&self, buffer_id: BufferId) -> Box<Future<Item = Vec<u16>, Error = io::Error>> {
+            Box::new(
+                self.work_tree
+                    .text(buffer_id)
+                    .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{}", err)))
+                    .map(|iter| iter.collect::<Vec<u16>>())
+                    .into_future(),
+            )
+        }
+
+        fn edit(
+            &self,
+            buffer_id: BufferId,
+            ranges: Vec<Range<memo_core::Point>>,
+            text: String,
+        ) -> Box<Future<Item = (), Error = io::Error>> {
+            Box::new(
+                self.work_tree
+                    .edit_2d(buffer_id, ranges, text)
+                    .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{}", err)))
+                    .map(|_| ())
+                    .into_future(),
+            )
+        }
+
+        fn add_selection_set(
+            &self,
+            buffer_id: BufferId,
+            ranges: Vec<Range<memo_core::Point>>,
+        ) -> Box<Future<Item = memo_core::LocalSelectionSetId, Error = io::Error>> {
+            Box::new(
+                self.work_tree
+                    .add_selection_set(buffer_id, ranges)
+                    .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{}", err)))
+                    .map(|(set_id, _)| set_id)
+                    .into_future(),
+            )
+        }
+
+        fn replace_selection_set(
+            &self,
+            buffer_id: BufferId,
+            selection_set_id: memo_core::LocalSelectionSetId,
+            ranges: Vec<Range<memo_core::Point>>,
+        ) -> Box<Future<Item = (), Error = io::Error>> {
+            Box::new(
+                self.work_tree
+                    .replace_selection_set(buffer_id, selection_set_id, ranges)
+                    .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{}", err)))
+                    .map(|_| ())
+                    .into_future(),
+            )
+        }
+
+        fn remove_selection_set(
+            &self,
+            buffer_id: BufferId,
+            selection_set_id: memo_core::LocalSelectionSetId,
+        ) -> Box<Future<Item = (), Error = io::Error>> {
+            Box::new(
+                self.work_tree
+                    .remove_selection_set(buffer_id, selection_set_id)
+                    .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{}", err)))
+                    .map(|_| ())
+                    .into_future(),
+            )
+        }
+
+        fn selection_ranges(
+            &self,
+            buffer_id: BufferId,
+        ) -> Result<memo_core::BufferSelectionRanges, io::Error> {
+            self.work_tree
+                .selection_ranges(buffer_id)
+                .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{}", err)))
         }
     }
 
@@ -735,16 +916,11 @@ pub(crate) mod tests {
             }))
         }
 
-        fn write_snapshot(
+        fn write_text(
             &self,
-            snapshot: BufferSnapshot,
+            text: Box<Future<Item = Vec<u16>, Error = io::Error>>,
         ) -> Box<Future<Item = (), Error = io::Error>> {
-            let file = self.0.clone();
-            Box::new(NextTick::new().then(move |_| {
-                let mut file = file.borrow_mut();
-                file.content = snapshot.to_string();
-                future::ok(())
-            }))
+            unimplemented!()
         }
     }
 

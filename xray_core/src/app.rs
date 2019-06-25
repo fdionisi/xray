@@ -1,17 +1,22 @@
-use bytes::Bytes;
-use fs;
-use futures::unsync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use futures::{future, Async, Future, IntoFuture, Stream};
-use never::Never;
-use notify_cell::{NotifyCell, NotifyCellObserver};
-use project::LocalProject;
-use rpc::{self, client, server};
-use serde_json;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::rc::Rc;
+
+use bytes::Bytes;
+use futures::{
+    future,
+    unsync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+    Async, Future, IntoFuture, Stream,
+};
+
+use fs;
+use never::Never;
+use notify_cell::{NotifyCell, NotifyCellObserver};
+use project::LocalProject;
+use rpc::{self, client, server};
+use serde_json;
 use window::{ViewId, Window, WindowUpdateStream};
 use workspace::{LocalWorkspace, RemoteWorkspace, Workspace, WorkspaceService, WorkspaceView};
 use BackgroundExecutor;
@@ -26,7 +31,6 @@ pub struct App {
     headless: bool,
     foreground: ForegroundExecutor,
     background: BackgroundExecutor,
-    file_provider: Rc<fs::FileProvider>,
     commands_tx: UnboundedSender<Command>,
     commands_rx: Option<UnboundedReceiver<Command>>,
     peer_list: Rc<RefCell<PeerList>>,
@@ -101,11 +105,10 @@ enum WorkspaceOpenError {
 }
 
 impl App {
-    pub fn new<T: 'static + fs::FileProvider>(
+    pub fn new(
         headless: bool,
         foreground: ForegroundExecutor,
         background: BackgroundExecutor,
-        file_provider: T,
     ) -> Rc<RefCell<Self>> {
         let (commands_tx, commands_rx) = mpsc::unbounded();
         let peer_list = PeerList::new(foreground.clone()).into_shared();
@@ -113,7 +116,6 @@ impl App {
             headless,
             foreground: foreground.clone(),
             background,
-            file_provider: Rc::new(file_provider),
             commands_tx,
             commands_rx: Some(commands_rx),
             peer_list: peer_list.clone(),
@@ -469,7 +471,7 @@ impl fmt::Display for WorkspaceOpenError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs::tests::{TestFileProvider, TestTree};
+    use fs::tests::TestTree;
     use futures::{unsync, Future, Sink};
     use stream_ext::StreamExt;
     use tokio_core::reactor;
@@ -478,18 +480,8 @@ mod tests {
     fn test_remote_workspaces() {
         let mut reactor = reactor::Core::new().unwrap();
         let executor = Rc::new(reactor.handle());
-        let server = App::new(
-            true,
-            executor.clone(),
-            executor.clone(),
-            TestFileProvider::new(),
-        );
-        let client = App::new(
-            false,
-            executor.clone(),
-            executor.clone(),
-            TestFileProvider::new(),
-        );
+        let server = App::new(true, executor.clone(), executor.clone());
+        let client = App::new(false, executor.clone(), executor.clone());
         let peer_list = client.borrow().peer_list.clone();
 
         let mut peer_list_updates = peer_list.borrow().updates();

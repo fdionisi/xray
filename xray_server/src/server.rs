@@ -30,9 +30,8 @@ impl Server {
     pub fn new(headless: bool, reactor: reactor::Handle) -> Self {
         let foreground = Rc::new(reactor.clone());
         let background = Rc::new(CpuPool::new_num_cpus());
-        let file_provider = fs::FileProvider::new();
         Server {
-            app: App::new(headless, foreground, background, file_provider),
+            app: App::new(headless, foreground, background),
             providers: Rc::new(RefCell::new(HashMap::new())),
             databases: Rc::new(RefCell::new(HashMap::new())),
             reactor,

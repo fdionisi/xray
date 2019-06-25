@@ -779,7 +779,8 @@ class Renderer {
 
     for (var i = 0; i < selections.length; i++) {
       const selection = selections[i];
-      const colorIndex = selection.user_id % selectionColors.length;
+      // const colorIndex = (selection.user_id || 0) % selectionColors.length;
+      const colorIndex = Math.ceil(Math.random() * 10) % selectionColors.length;
       const selectionColor = selectionColors[colorIndex];
       const cursorColor = cursorColors[colorIndex];
 

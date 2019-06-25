@@ -74,7 +74,7 @@ struct ChangesIter<F: Fn(&FragmentSummary) -> bool> {
     since: time::Global,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Change {
     pub range: Range<Point>,
     pub code_units: Vec<u16>,
@@ -258,6 +258,10 @@ impl Buffer {
 
     pub fn max_point(&self) -> Point {
         self.fragments.extent()
+    }
+
+    pub fn clip_point(&self, original: Point) -> Point {
+        return cmp::max(cmp::min(original, self.max_point()), Point::new(0, 0));
     }
 
     pub fn line(&self, row: u32) -> Result<Vec<u16>, Error> {

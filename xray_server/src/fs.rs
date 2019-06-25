@@ -1,23 +1,26 @@
-use database;
-use futures::{self, Future, Stream};
-use git;
-use memo_core::WorkTree;
-use parking_lot::Mutex;
 use std::cell::RefCell;
 use std::char::decode_utf16;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::thread;
+
+use futures::{self, Future, IntoFuture, Stream};
+use memo_core::WorkTree;
+use parking_lot::Mutex;
 use uuid;
-use xray_core::buffer::BufferSnapshot;
+use xray_core::buffer::BufferId;
 use xray_core::cross_platform;
 use xray_core::fs as xray_fs;
 use xray_core::notify_cell::NotifyCell;
+
+use database;
+use git;
 
 pub struct Tree {
     path: cross_platform::Path,
@@ -27,8 +30,6 @@ pub struct Tree {
     updates: NotifyCell<()>,
     populated: NotifyCell<bool>,
 }
-
-pub struct FileProvider;
 
 pub struct File {
     id: xray_fs::FileId,
@@ -69,6 +70,11 @@ impl Tree {
             updates,
             populated,
         })
+    }
+
+    pub fn digest_operation(&self, envelope: memo_core::OperationEnvelope) {
+        self.database.borrow_mut().add(envelope);
+        self.updates.set(());
     }
 
     fn populate(
@@ -142,6 +148,10 @@ impl xray_fs::LocalTree for Tree {
         Box::new(futures::future::ok(()))
     }
 
+    fn as_tree(&self) -> &xray_fs::Tree {
+        self
+    }
+
     fn open_file(
         &self,
         relative_path: &cross_platform::Path,
@@ -178,36 +188,130 @@ impl xray_fs::LocalTree for Tree {
                 .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{}", err))),
         )
     }
-}
 
-impl FileProvider {
-    pub fn new() -> Self {
-        FileProvider
+    fn max_point(&self, buffer_id: BufferId) -> memo_core::Point {
+        self.work_tree.max_point(buffer_id).unwrap()
     }
-}
 
-impl xray_fs::FileProvider for FileProvider {
-    fn open(
+    fn clip_point(&self, buffer_id: BufferId, original: memo_core::Point) -> memo_core::Point {
+        self.work_tree.clip_point(buffer_id, original).unwrap()
+    }
+
+    fn longest_row(&self, buffer_id: BufferId) -> u32 {
+        self.work_tree.longest_row(buffer_id).unwrap()
+    }
+
+    fn line(&self, buffer_id: BufferId, row: u32) -> Vec<u16> {
+        self.work_tree.line(buffer_id, row).unwrap()
+    }
+
+    fn len_for_row(&self, buffer_id: BufferId, row: u32) -> u32 {
+        self.work_tree.len_for_row(buffer_id, row).unwrap()
+    }
+
+    fn iter_at_point(
         &self,
-        path: &cross_platform::Path,
-    ) -> Box<Future<Item = Box<xray_fs::File>, Error = io::Error>> {
-        let path = path.to_path_buf();
-        let (tx, rx) = futures::sync::oneshot::channel();
+        buffer_id: BufferId,
+        point: memo_core::Point,
+    ) -> Box<Iterator<Item = u16>> {
+        Box::new(self.work_tree.iter_at_point(buffer_id, point).unwrap())
+    }
 
-        thread::spawn(|| {
-            fn open(path: PathBuf) -> Result<File, io::Error> {
-                Ok(File::new(
-                    fs::OpenOptions::new().read(true).write(true).open(path)?,
-                )?)
-            }
-
-            let _ = tx.send(open(path));
-        });
-
+    fn backward_iter_at_point(
+        &self,
+        buffer_id: BufferId,
+        point: memo_core::Point,
+    ) -> Box<Iterator<Item = u16>> {
         Box::new(
-            rx.then(|result| result.expect("Sender should not be dropped"))
-                .map(|file| Box::new(file) as Box<xray_fs::File>),
+            self.work_tree
+                .iter_at_point(buffer_id, point)
+                .unwrap()
+                .rev(),
         )
+    }
+
+    fn len(&self, buffer_id: BufferId) -> usize {
+        self.work_tree.len(buffer_id).unwrap()
+    }
+
+    fn text(&self, buffer_id: BufferId) -> Box<Future<Item = Vec<u16>, Error = io::Error>> {
+        Box::new(
+            self.work_tree
+                .text(buffer_id)
+                .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{}", err)))
+                .map(|iter| iter.collect::<Vec<u16>>())
+                .into_future(),
+        )
+    }
+
+    fn edit(
+        &self,
+        buffer_id: BufferId,
+        ranges: Vec<Range<memo_core::Point>>,
+        text: String,
+    ) -> Box<Future<Item = (), Error = io::Error>> {
+        Box::new(
+            self.work_tree
+                .edit_2d(buffer_id, ranges, text)
+                .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{}", err)))
+                .map(|envelope| self.digest_operation(envelope))
+                .into_future(),
+        )
+    }
+
+    fn add_selection_set(
+        &self,
+        buffer_id: BufferId,
+        ranges: Vec<Range<memo_core::Point>>,
+    ) -> Box<Future<Item = memo_core::LocalSelectionSetId, Error = io::Error>> {
+        Box::new(
+            self.work_tree
+                .add_selection_set(buffer_id, ranges)
+                .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{}", err)))
+                .map(|(set_id, envelope)| {
+                    self.digest_operation(envelope);
+                    set_id
+                })
+                .into_future(),
+        )
+    }
+
+    fn replace_selection_set(
+        &self,
+        buffer_id: BufferId,
+        selection_set_id: memo_core::LocalSelectionSetId,
+        ranges: Vec<Range<memo_core::Point>>,
+    ) -> Box<Future<Item = (), Error = io::Error>> {
+        Box::new(
+            self.work_tree
+                .replace_selection_set(buffer_id, selection_set_id, ranges)
+                .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{}", err)))
+                .map(|envelope| self.digest_operation(envelope))
+                .into_future(),
+        )
+    }
+
+    fn remove_selection_set(
+        &self,
+        buffer_id: BufferId,
+        selection_set_id: memo_core::LocalSelectionSetId,
+    ) -> Box<Future<Item = (), Error = io::Error>> {
+        Box::new(
+            self.work_tree
+                .remove_selection_set(buffer_id, selection_set_id)
+                .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{}", err)))
+                .map(|envelope| self.digest_operation(envelope))
+                .into_future(),
+        )
+    }
+
+    fn selection_ranges(
+        &self,
+        buffer_id: BufferId,
+    ) -> Result<memo_core::BufferSelectionRanges, io::Error> {
+        self.work_tree
+            .selection_ranges(buffer_id)
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{}", err)))
     }
 }
 
@@ -242,22 +346,20 @@ impl xray_fs::File for File {
         Box::new(rx.then(|result| result.expect("Sender should not be dropped")))
     }
 
-    fn write_snapshot(
+    fn write_text(
         &self,
-        snapshot: BufferSnapshot,
+        text: Box<Future<Item = Vec<u16>, Error = io::Error>>,
     ) -> Box<Future<Item = (), Error = io::Error>> {
         let (tx, rx) = futures::sync::oneshot::channel();
         let file = self.file.clone();
+        let text = text.wait().unwrap();
         thread::spawn(move || {
-            fn write(file: &mut fs::File, snapshot: BufferSnapshot) -> Result<(), io::Error> {
+            fn write(file: &mut fs::File, text: Vec<u16>) -> Result<(), io::Error> {
                 let mut size = 0_u64;
                 {
                     let mut buf_writer = io::BufWriter::new(&mut *file);
                     buf_writer.seek(SeekFrom::Start(0))?;
-                    for character in snapshot
-                        .iter()
-                        .flat_map(|c| decode_utf16(c.iter().cloned()))
-                    {
+                    for character in decode_utf16(text) {
                         let character = character.map_err(|_| {
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
@@ -274,7 +376,7 @@ impl xray_fs::File for File {
                 Ok(())
             }
 
-            let _ = tx.send(write(&mut file.lock(), snapshot));
+            let _ = tx.send(write(&mut file.lock(), text));
         });
         Box::new(rx.then(|result| result.expect("Sender should not be dropped")))
     }
