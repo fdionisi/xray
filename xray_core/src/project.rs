@@ -316,10 +316,10 @@ impl Project for RemoteProject {
                                     .take_service(service_id)
                                     .map_err(|error| error.into())
                                     .and_then(|buffer_service| {
-                                        Ok(BufferEntry::Remote(
-                                            RemoteBuffer::new(foreground, buffer_service)
-                                                .into_shared(),
-                                        ))
+                                        Ok(BufferEntry::Remote(RemoteBuffer::new(
+                                            foreground,
+                                            buffer_service,
+                                        )))
                                         // .map_err(|error| error.into())
                                     })
                             }),
@@ -345,10 +345,10 @@ impl Project for RemoteProject {
                                     .take_service(service_id)
                                     .map_err(|error| error.into())
                                     .and_then(|buffer_service| {
-                                        Ok(BufferEntry::Remote(
-                                            RemoteBuffer::new(foreground, buffer_service)
-                                                .into_shared(),
-                                        ))
+                                        Ok(BufferEntry::Remote(RemoteBuffer::new(
+                                            foreground,
+                                            buffer_service,
+                                        )))
                                         // .map_err(|error| error.into())
                                     })
                             }),

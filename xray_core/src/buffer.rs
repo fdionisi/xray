@@ -14,10 +14,11 @@ use never::Never;
 use notify_cell::NotifyCell;
 use rpc;
 use ForegroundExecutor;
+use IntoShared;
 
 pub use memo_core::{BufferId, LocalSelectionSetId as SelectionSetId, Point, ReplicaId};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RpcState {
     id: BufferId,
     text: Vec<u16>,
@@ -25,7 +26,7 @@ pub struct RpcState {
     remote_selections: HashMap<ReplicaId, Vec<Vec<Range<Point>>>>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum RpcRequest {
     Edit {
         ranges: Vec<Range<Point>>,
@@ -42,7 +43,7 @@ pub enum RpcRequest {
     Save,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum RpcResponse {
     Edited(String),
     UpdatedSelectionSet(SelectionSetId, Vec<Range<Point>>),
@@ -50,7 +51,7 @@ pub enum RpcResponse {
     Saved,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum RpcUpdate {
     Text(String),
     Selections {
@@ -60,18 +61,43 @@ pub enum RpcUpdate {
 }
 
 pub struct BufferService {
+    updates: Box<Stream<Item = (), Error = ()>>,
     buffer: Rc<RefCell<LocalBuffer>>,
 }
 
 impl BufferService {
     pub fn new(buffer: Rc<RefCell<LocalBuffer>>) -> Self {
-        Self { buffer }
+        let updates = buffer.borrow().updates();
+
+        Self { buffer, updates }
+    }
+
+    fn poll_outgoing_updates(&mut self) -> Async<Option<RpcState>> {
+        loop {
+            match self
+                .updates
+                .poll()
+                .expect("Polling a NotifyCellObserver cannot produce an error")
+            {
+                Async::NotReady => return Async::NotReady,
+                Async::Ready(None) => unreachable!(),
+                Async::Ready(Some(())) => {
+                    let buffer = self.buffer.borrow();
+                    return Async::Ready(Some(RpcState {
+                        id: buffer.id,
+                        text: buffer.text().wait().unwrap(),
+                        local_selections: buffer.local_selections().unwrap(),
+                        remote_selections: buffer.remote_selections().unwrap(),
+                    }));
+                }
+            }
+        }
     }
 }
 
 impl rpc::server::Service for BufferService {
     type State = RpcState;
-    type Update = RpcUpdate;
+    type Update = RpcState;
     type Request = RpcRequest;
     type Response = RpcResponse;
 
@@ -86,7 +112,11 @@ impl rpc::server::Service for BufferService {
     }
 
     fn poll_update(&mut self, _: &rpc::server::Connection) -> Async<Option<Self::Update>> {
-        unimplemented!()
+        match self.poll_outgoing_updates() {
+            Async::Ready(Some(update)) => Async::Ready(Some(update)),
+            Async::Ready(None) => Async::Ready(None),
+            Async::NotReady => Async::NotReady,
+        }
     }
 
     fn request(
@@ -159,7 +189,7 @@ impl rpc::server::Service for BufferService {
     }
 }
 
-pub trait BufferTrait {
+pub trait Buffer {
     fn save(&self) -> Box<Future<Item = (), Error = io::Error>>;
 
     fn text(&self) -> Box<Future<Item = Vec<u16>, Error = io::Error>>;
@@ -193,7 +223,7 @@ pub enum BufferEntry {
 }
 
 impl BufferEntry {
-    pub fn buffer(&self) -> Rc<RefCell<BufferTrait>> {
+    pub fn buffer(&self) -> Rc<RefCell<Buffer>> {
         match self {
             BufferEntry::Local(buffer) => buffer.clone(),
             BufferEntry::Remote(buffer) => buffer.clone(),
@@ -320,7 +350,7 @@ impl LocalBuffer {
     }
 }
 
-impl BufferTrait for LocalBuffer {
+impl Buffer for LocalBuffer {
     fn save(&self) -> Box<Future<Item = (), Error = io::Error>> {
         Box::new(self.file.write_text(self.text()))
     }
@@ -388,12 +418,29 @@ impl RemoteBuffer {
     pub fn new(
         foreground: ForegroundExecutor,
         service: rpc::client::Service<BufferService>,
-    ) -> RemoteBuffer {
-        RemoteBuffer { service }
+    ) -> Rc<RefCell<RemoteBuffer>> {
+        let incoming_updates = service.updates().unwrap();
+        let buffer = RemoteBuffer { service }.into_shared();
+
+        let buffer_weak = Rc::downgrade(&buffer);
+        foreground
+            .execute(Box::new(incoming_updates.for_each(move |update| {
+                if let Some(buffer) = buffer_weak.upgrade() {
+                    let mut buffer = buffer.borrow_mut();
+                    match update {
+                        _ => panic!("Buffer update kind: {:?}", update),
+                    }
+                }
+
+                Ok(())
+            })))
+            .unwrap();
+
+        buffer
     }
 }
 
-impl BufferTrait for RemoteBuffer {
+impl Buffer for RemoteBuffer {
     fn save(&self) -> Box<Future<Item = (), Error = io::Error>> {
         Box::new(
             self.service

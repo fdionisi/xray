@@ -7,7 +7,7 @@ use std::rc::Rc;
 use futures::{Future, Poll, Stream};
 use serde_json;
 
-use buffer::{BufferId, BufferTrait, LocalBuffer, Point, ReplicaId, SelectionSetId};
+use buffer::{Buffer, BufferId, LocalBuffer, Point, ReplicaId, SelectionSetId};
 use movement;
 use notify_cell::NotifyCell;
 use window::{View, WeakViewHandle, Window};
@@ -182,10 +182,7 @@ impl BufferView {
 
     pub fn edit(&mut self, text: &str) {
         {
-            let offset_ranges = {
-                let buffer = self.buffer.borrow();
-                self.selections()
-            };
+            let offset_ranges = self.selections();
 
             let buffer = self.buffer.borrow_mut();
             buffer
@@ -202,7 +199,13 @@ impl BufferView {
                         .map(|range| {
                             let start = range.start;
                             let end = range.end;
-                            let point = Point::new(end.row, end.column + text_char_length as u32);
+
+                            let point = if text == "\n" {
+                                Point::new(end.row + 1, 0)
+                            } else {
+                                Point::new(end.row, end.column + text_char_length as u32)
+                            };
+
                             point..point
                         })
                         .collect()
