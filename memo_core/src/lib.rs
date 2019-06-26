@@ -7,11 +7,11 @@ mod serialization;
 pub mod time;
 mod work_tree;
 
-pub use crate::buffer::{Buffer, Change, Point};
+pub use crate::buffer::{Buffer, Change, Point, Selection, Text};
 pub use crate::epoch::{Cursor, DirEntry, Epoch, FileStatus, FileType, ROOT_FILE_ID};
 pub use crate::work_tree::{
     BufferId, BufferSelectionRanges, ChangeObserver, GitProvider, LocalSelectionSetId, Operation,
-    OperationEnvelope, WorkTree,
+    OperationEnvelope, WorkTree
 };
 use std::borrow::Cow;
 use std::fmt;

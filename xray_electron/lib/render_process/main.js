@@ -1,3 +1,5 @@
+require('electron-react-devtools').install()
+
 process.env.NODE_ENV = "production";
 
 const { React, ReactDOM, App, buildViewRegistry } = require("xray_ui");

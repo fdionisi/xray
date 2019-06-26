@@ -74,7 +74,7 @@ struct ChangesIter<F: Fn(&FragmentSummary) -> bool> {
     since: time::Global,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Change {
     pub range: Range<Point>,
     pub code_units: Vec<u16>,

@@ -12,6 +12,7 @@
     "xray_ui": "../xray_ui"
   },
   "devDependencies": {
-    "electron": "2.0.0-beta.7"
+    "electron": "2.0.0-beta.7",
+    "electron-react-devtools": "^0.5.3"
   }
 }

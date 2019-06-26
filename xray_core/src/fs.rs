@@ -1,18 +1,26 @@
-use buffer::BufferSnapshot;
-use cross_platform;
-use futures::{Async, Future, Stream};
-use notify_cell::NotifyCell;
-use parking_lot::RwLock;
-use rpc::{client, server};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-#[cfg(test)]
-use serde_json;
 use std::cell::RefCell;
 use std::io;
 use std::iter::Iterator;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+
+use futures::{Async, Future, Stream};
+use parking_lot::RwLock;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use buffer::BufferId;
+use cross_platform;
+use git::{GitProvider, GitProviderService, Oid, RemoteGitProvider};
+use notify_cell::NotifyCell;
+use rpc::{self, client, server};
+use storage::Storage;
+use work_tree::WorkTree;
 use ForegroundExecutor;
+use IntoShared;
+use ReplicaId;
+
+pub use memo_core::{FileStatus, FileType};
 
 pub type EntryId = usize;
 pub type FileId = u64;
@@ -20,12 +28,24 @@ pub type FileId = u64;
 pub trait Tree {
     fn root(&self) -> Entry;
     fn updates(&self) -> Box<Stream<Item = (), Error = ()>>;
+
+    fn work_tree(&self) -> Rc<RefCell<WorkTree>>;
+    fn open_buffer(
+        &self,
+        relative_path: PathBuf,
+    ) -> Box<Future<Item = BufferId, Error = io::Error>>;
 }
 
 pub trait LocalTree: Tree {
     fn path(&self) -> &cross_platform::Path;
     fn populated(&self) -> Box<Future<Item = (), Error = ()>>;
     fn as_tree(&self) -> &Tree;
+
+    fn git_provider(&self) -> Rc<dyn GitProvider>;
+    fn open_file(
+        &self,
+        relative_path: &cross_platform::Path,
+    ) -> Box<Future<Item = Box<File>, Error = io::Error>>;
 }
 
 pub trait FileProvider {
@@ -36,15 +56,17 @@ pub trait FileProvider {
 pub trait File {
     fn id(&self) -> FileId;
     fn read(&self) -> Box<Future<Item = String, Error = io::Error>>;
-    fn write_snapshot(&self, snapshot: BufferSnapshot)
-        -> Box<Future<Item = (), Error = io::Error>>;
+    fn write_u16_chars(&self, _text: Vec<u16>) -> Box<dyn Future<Item = (), Error = io::Error>>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Entry {
     #[serde(serialize_with = "serialize_dir", deserialize_with = "deserialize_dir")]
     Dir(Arc<DirInner>),
-    #[serde(serialize_with = "serialize_file", deserialize_with = "deserialize_file")]
+    #[serde(
+        serialize_with = "serialize_file",
+        deserialize_with = "deserialize_file"
+    )]
     File(Arc<FileInner>),
 }
 
@@ -74,7 +96,10 @@ pub struct TreeService {
     populated: Option<Box<Future<Item = (), Error = ()>>>,
 }
 
-pub struct RemoteTree(Rc<RefCell<RemoteTreeState>>);
+pub struct RemoteTree {
+    state: Rc<RefCell<RemoteTreeState>>,
+    work_tree: Rc<RefCell<WorkTree>>,
+}
 
 struct RemoteTreeState {
     root: Entry,
@@ -228,18 +253,47 @@ impl TreeService {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RpcState {
+    root: Entry,
+    oid: Option<Oid>,
+    git_provider: rpc::ServiceId,
+}
+
 impl server::Service for TreeService {
-    type State = Entry;
+    type State = RpcState;
     type Update = Entry;
     type Request = ();
     type Response = ();
 
     fn init(&mut self, connection: &server::Connection) -> Self::State {
-        if let Async::Ready(Some(tree)) = self.poll_update(connection) {
-            tree
+        if let Async::Ready(Some(root)) = self.poll_update(connection) {
+            let tree = self.tree.as_tree();
+            let work_tree = tree.work_tree();
+            let work_tree = work_tree.borrow();
+            let oid = work_tree.head();
+            let git_provider = connection
+                .add_service(GitProviderService::new(self.tree.git_provider()))
+                .service_id();
+            RpcState {
+                root,
+                oid,
+                git_provider,
+            }
         } else {
             let root = self.tree.root();
-            Entry::dir(root.name().to_owned(), root.is_symlink(), root.is_ignored())
+            let tree = self.tree.as_tree();
+            let work_tree = tree.work_tree();
+            let work_tree = work_tree.borrow();
+            let oid = work_tree.head();
+            let git_provider = connection
+                .add_service(GitProviderService::new(self.tree.git_provider()))
+                .service_id();
+            RpcState {
+                root: Entry::dir(root.name().to_owned(), root.is_symlink(), root.is_ignored()),
+                oid,
+                git_provider,
+            }
         }
     }
 
@@ -258,13 +312,29 @@ impl server::Service for TreeService {
 }
 
 impl RemoteTree {
-    pub fn new(foreground: ForegroundExecutor, service: client::Service<TreeService>) -> Self {
+    pub fn new(
+        replica_id: ReplicaId,
+        foreground: ForegroundExecutor,
+        database: Rc<dyn Storage>,
+        service: client::Service<TreeService>,
+    ) -> Self {
         let updates = service.updates().unwrap();
+
+        let state = service.state().unwrap();
+        let root = state.root;
+        let base = state.oid;
+        let git_service = state.git_provider;
+
         let state = Rc::new(RefCell::new(RemoteTreeState {
-            root: service.state().unwrap(),
-            _service: service,
+            root,
+            _service: service.clone(),
             updates: NotifyCell::new(()),
         }));
+
+        let git_service = service.take_service(git_service).unwrap();
+        let git = Rc::new(RemoteGitProvider::new(git_service));
+
+        let work_tree = WorkTree::new(foreground.clone(), database.clone(), replica_id, base, git);
 
         let state_clone = state.clone();
         foreground
@@ -276,307 +346,320 @@ impl RemoteTree {
             })))
             .unwrap();
 
-        RemoteTree(state)
+        RemoteTree {
+            state,
+            work_tree: work_tree.into_shared(),
+        }
     }
 }
 
 impl Tree for RemoteTree {
     fn root(&self) -> Entry {
-        self.0.borrow().root.clone()
+        self.state.borrow().root.clone()
     }
 
     fn updates(&self) -> Box<Stream<Item = (), Error = ()>> {
-        Box::new(self.0.borrow().updates.observe())
+        Box::new(self.state.borrow().updates.observe())
+    }
+
+    fn work_tree(&self) -> Rc<RefCell<WorkTree>> {
+        self.work_tree.clone()
+    }
+
+    fn open_buffer(
+        &self,
+        relative_path: PathBuf,
+    ) -> Box<Future<Item = BufferId, Error = io::Error>> {
+        Box::new(
+            self.work_tree
+                .borrow()
+                .open_text_file(relative_path)
+                .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{}", err))),
+        )
     }
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
-    use bincode::{deserialize, serialize};
-    use cross_platform::PathComponent;
-    use futures::{future, task, Async, IntoFuture, Poll};
-    use never::Never;
-    use notify_cell::NotifyCell;
-    use rpc;
-    use std::collections::HashMap;
-    use std::ffi::OsString;
-    use std::path::PathBuf;
-    use stream_ext::StreamExt;
-    use tokio_core::reactor;
+// #[cfg(test)]
+// pub(crate) mod tests {
+//     use super::*;
+//     use bincode::{deserialize, serialize};
+//     use cross_platform::PathComponent;
+//     use futures::{future, task, Async, IntoFuture, Poll};
+//     use never::Never;
+//     use notify_cell::NotifyCell;
+//     use rpc;
+//     use serde_json;
+//     use std::collections::HashMap;
+//     use std::ffi::OsString;
+//     use std::path::PathBuf;
+//     use stream_ext::StreamExt;
+//     use tokio_core::reactor;
 
-    #[test]
-    fn test_insert() {
-        let root = Entry::dir(PathComponent::from("root"), false, false);
-        assert_eq!(
-            root.insert(Entry::file(PathComponent::from("a"), false, false)),
-            Ok(())
-        );
-        assert_eq!(
-            root.insert(Entry::file(PathComponent::from("c"), false, false)),
-            Ok(())
-        );
-        assert_eq!(
-            root.insert(Entry::file(PathComponent::from("b"), false, false)),
-            Ok(())
-        );
-        assert_eq!(
-            root.insert(Entry::file(PathComponent::from("a"), false, false)),
-            Err(())
-        );
-        assert_eq!(root.child_names(), vec!["a", "b", "c"]);
-    }
+//     #[test]
+//     fn test_insert() {
+//         let root = Entry::dir(PathComponent::from("root"), false, false);
+//         assert_eq!(
+//             root.insert(Entry::file(PathComponent::from("a"), false, false)),
+//             Ok(())
+//         );
+//         assert_eq!(
+//             root.insert(Entry::file(PathComponent::from("c"), false, false)),
+//             Ok(())
+//         );
+//         assert_eq!(
+//             root.insert(Entry::file(PathComponent::from("b"), false, false)),
+//             Ok(())
+//         );
+//         assert_eq!(
+//             root.insert(Entry::file(PathComponent::from("a"), false, false)),
+//             Err(())
+//         );
+//         assert_eq!(root.child_names(), vec!["a", "b", "c"]);
+//     }
 
-    #[test]
-    fn test_serialize_deserialize() {
-        let root = Entry::from_json(
-            "root",
-            &json!({
-                "child-1": {
-                    "subchild-1-1": null
-                },
-                "child-2": null,
-                "child-3": {
-                    "subchild-3-1": {
-                        "subchild-3-1-1": null,
-                        "subchild-3-1-2": null,
-                    }
-                }
-            }),
-        );
-        assert_eq!(
-            deserialize::<Entry>(&serialize(&root).unwrap()).unwrap(),
-            root
-        );
-    }
+//     #[test]
+//     fn test_serialize_deserialize() {
+//         let root = Entry::from_json(
+//             "root",
+//             &json!({
+//                 "child-1": {
+//                     "subchild-1-1": null
+//                 },
+//                 "child-2": null,
+//                 "child-3": {
+//                     "subchild-3-1": {
+//                         "subchild-3-1-1": null,
+//                         "subchild-3-1-2": null,
+//                     }
+//                 }
+//             }),
+//         );
+//         assert_eq!(
+//             deserialize::<Entry>(&serialize(&root).unwrap()).unwrap(),
+//             root
+//         );
+//     }
 
-    #[test]
-    fn test_tree_replication() {
-        let mut reactor = reactor::Core::new().unwrap();
-        let handle = Rc::new(reactor.handle());
+//     #[test]
+//     fn test_tree_replication() {
+//         let mut reactor = reactor::Core::new().unwrap();
+//         let handle = Rc::new(reactor.handle());
 
-        let local_tree = Rc::new(TestTree::new(
-            "/foo/bar",
-            Entry::from_json(
-                "root",
-                &json!({
-                    "child-1": {
-                        "subchild": null
-                    },
-                    "child-2": null,
-                }),
-            ),
-        ));
-        let remote_tree = RemoteTree::new(
-            handle,
-            rpc::tests::connect(&mut reactor, TreeService::new(local_tree.clone())),
-        );
-        assert_eq!(remote_tree.root().name(), local_tree.root().name());
-        assert_eq!(remote_tree.root().children().unwrap().len(), 0);
+//         let local_tree = Rc::new(TestTree::new(
+//             "/foo/bar",
+//             Entry::from_json(
+//                 "root",
+//                 &json!({
+//                     "child-1": {
+//                         "subchild": null
+//                     },
+//                     "child-2": null,
+//                 }),
+//             ),
+//         ));
+//         let remote_tree = RemoteTree::new(
+//             handle,
+//             rpc::tests::connect(&mut reactor, TreeService::new(local_tree.clone())),
+//         );
+//         assert_eq!(remote_tree.root().name(), local_tree.root().name());
+//         assert_eq!(remote_tree.root().children().unwrap().len(), 0);
 
-        let mut remote_tree_updates = remote_tree.updates();
-        local_tree.populated.set(true);
-        remote_tree_updates.wait_next(&mut reactor);
-        assert_eq!(remote_tree.root(), local_tree.root());
-    }
+//         let mut remote_tree_updates = remote_tree.updates();
+//         local_tree.populated.set(true);
+//         remote_tree_updates.wait_next(&mut reactor);
+//         assert_eq!(remote_tree.root(), local_tree.root());
+//     }
 
-    pub struct TestTree {
-        path: cross_platform::Path,
-        root: Entry,
-        pub populated: NotifyCell<bool>,
-    }
+//     pub struct TestTree {
+//         path: cross_platform::Path,
+//         root: Entry,
+//         pub populated: NotifyCell<bool>,
+//     }
 
-    pub struct TestFileProvider(Rc<RefCell<TestFileProviderState>>);
+//     pub struct TestFileProvider(Rc<RefCell<TestFileProviderState>>);
 
-    struct TestFileProviderState {
-        next_file_id: FileId,
-        files: HashMap<PathBuf, TestFile>,
-    }
+//     struct TestFileProviderState {
+//         next_file_id: FileId,
+//         files: HashMap<PathBuf, TestFile>,
+//     }
 
-    #[derive(Clone)]
-    struct TestFile(Rc<RefCell<TestFileState>>);
+//     #[derive(Clone)]
+//     struct TestFile(Rc<RefCell<TestFileState>>);
 
-    struct TestFileState {
-        id: FileId,
-        content: String,
-    }
+//     struct TestFileState {
+//         id: FileId,
+//         content: String,
+//     }
 
-    struct NextTick(bool);
+//     struct NextTick(bool);
 
-    impl TestTree {
-        pub fn new<T: Into<OsString>>(path: T, root: Entry) -> Self {
-            Self {
-                path: cross_platform::Path::from(path.into()),
-                root,
-                populated: NotifyCell::new(false),
-            }
-        }
+//     impl TestTree {
+//         pub fn new<T: Into<OsString>>(path: T, root: Entry) -> Self {
+//             Self {
+//                 path: cross_platform::Path::from(path.into()),
+//                 root,
+//                 populated: NotifyCell::new(false),
+//             }
+//         }
 
-        pub fn from_json<T: Into<PathBuf>>(path: T, json: serde_json::Value) -> Self {
-            let path = path.into();
-            let root = Entry::from_json(PathComponent::from(path.file_name().unwrap()), &json);
-            Self::new(path, root)
-        }
-    }
+//         pub fn from_json<T: Into<PathBuf>>(path: T, json: serde_json::Value) -> Self {
+//             let path = path.into();
+//             let root = Entry::from_json(PathComponent::from(path.file_name().unwrap()), &json);
+//             Self::new(path, root)
+//         }
+//     }
 
-    impl Tree for TestTree {
-        fn root(&self) -> Entry {
-            self.root.clone()
-        }
+//     impl Tree for TestTree {
+//         fn root(&self) -> Entry {
+//             self.root.clone()
+//         }
 
-        fn updates(&self) -> Box<Stream<Item = (), Error = ()>> {
-            unimplemented!()
-        }
-    }
+//         fn updates(&self) -> Box<Stream<Item = (), Error = ()>> {
+//             unimplemented!()
+//         }
+//     }
 
-    impl LocalTree for TestTree {
-        fn path(&self) -> &cross_platform::Path {
-            &self.path
-        }
+//     impl LocalTree for TestTree {
+//         fn path(&self) -> &cross_platform::Path {
+//             &self.path
+//         }
 
-        fn populated(&self) -> Box<Future<Item = (), Error = ()>> {
-            if self.populated.get() {
-                Box::new(future::ok(()))
-            } else {
-                Box::new(
-                    self.populated
-                        .observe()
-                        .skip_while(|p| Ok(!p))
-                        .into_future()
-                        .then(|_| Ok(())),
-                )
-            }
-        }
+//         fn populated(&self) -> Box<Future<Item = (), Error = ()>> {
+//             if self.populated.get() {
+//                 Box::new(future::ok(()))
+//             } else {
+//                 Box::new(
+//                     self.populated
+//                         .observe()
+//                         .skip_while(|p| Ok(!p))
+//                         .into_future()
+//                         .then(|_| Ok(())),
+//                 )
+//             }
+//         }
 
-        fn as_tree(&self) -> &Tree {
-            self
-        }
-    }
+//         fn as_tree(&self) -> &Tree {
+//             self
+//         }
+//     }
 
-    impl Entry {
-        fn from_json<T: Into<PathComponent>>(name: T, json: &serde_json::Value) -> Self {
-            if json.is_object() {
-                let object = json.as_object().unwrap();
-                let dir = Entry::dir(name.into(), false, false);
-                for (key, value) in object {
-                    let child_entry = Self::from_json(key.as_str(), value);
-                    assert_eq!(dir.insert(child_entry), Ok(()));
-                }
-                dir
-            } else {
-                Entry::file(name.into(), false, false)
-            }
-        }
+//     impl Entry {
+//         fn from_json<T: Into<PathComponent>>(name: T, json: &serde_json::Value) -> Self {
+//             if json.is_object() {
+//                 let object = json.as_object().unwrap();
+//                 let dir = Entry::dir(name.into(), false, false);
+//                 for (key, value) in object {
+//                     let child_entry = Self::from_json(key.as_str(), value);
+//                     assert_eq!(dir.insert(child_entry), Ok(()));
+//                 }
+//                 dir
+//             } else {
+//                 Entry::file(name.into(), false, false)
+//             }
+//         }
 
-        fn child_names(&self) -> Vec<String> {
-            match self {
-                &Entry::Dir(ref inner) => inner
-                    .children
-                    .read()
-                    .iter()
-                    .map(|ref entry| entry.name().to_string_lossy().into_owned())
-                    .collect(),
-                _ => panic!(),
-            }
-        }
-    }
+//         fn child_names(&self) -> Vec<String> {
+//             match self {
+//                 &Entry::Dir(ref inner) => inner
+//                     .children
+//                     .read()
+//                     .iter()
+//                     .map(|ref entry| entry.name().to_string_lossy().into_owned())
+//                     .collect(),
+//                 _ => panic!(),
+//             }
+//         }
+//     }
 
-    impl PartialEq for Entry {
-        fn eq(&self, other: &Self) -> bool {
-            self.name() == other.name() && self.name_chars() == other.name_chars()
-                && self.is_dir() == other.is_dir()
-                && self.is_ignored() == other.is_ignored()
-                && self.children() == other.children()
-        }
-    }
+//     impl PartialEq for Entry {
+//         fn eq(&self, other: &Self) -> bool {
+//             self.name() == other.name()
+//                 && self.name_chars() == other.name_chars()
+//                 && self.is_dir() == other.is_dir()
+//                 && self.is_ignored() == other.is_ignored()
+//                 && self.children() == other.children()
+//         }
+//     }
 
-    impl TestFileProvider {
-        pub fn new() -> Self {
-            TestFileProvider(Rc::new(RefCell::new(TestFileProviderState {
-                next_file_id: 0,
-                files: HashMap::new(),
-            })))
-        }
+//     impl TestFileProvider {
+//         pub fn new() -> Self {
+//             TestFileProvider(Rc::new(RefCell::new(TestFileProviderState {
+//                 next_file_id: 0,
+//                 files: HashMap::new(),
+//             })))
+//         }
 
-        pub fn write_sync<S: Into<String>>(&self, path: cross_platform::Path, content: S) {
-            let mut state = self.0.borrow_mut();
+//         pub fn write_sync<S: Into<String>>(&self, path: cross_platform::Path, content: S) {
+//             let mut state = self.0.borrow_mut();
 
-            let file_id = state.next_file_id;
-            state.next_file_id += 1;
+//             let file_id = state.next_file_id;
+//             state.next_file_id += 1;
 
-            state.files.insert(
-                path.to_path_buf(),
-                TestFile(Rc::new(RefCell::new(TestFileState {
-                    id: file_id,
-                    content: content.into(),
-                }))),
-            );
-        }
-    }
+//             state.files.insert(
+//                 path.to_path_buf(),
+//                 TestFile(Rc::new(RefCell::new(TestFileState {
+//                     id: file_id,
+//                     content: content.into(),
+//                 }))),
+//             );
+//         }
+//     }
 
-    impl FileProvider for TestFileProvider {
-        fn open(
-            &self,
-            path: &cross_platform::Path,
-        ) -> Box<Future<Item = Box<File>, Error = io::Error>> {
-            let path = path.to_path_buf();
-            let state = self.0.clone();
-            Box::new(NextTick::new().then(move |_| {
-                let state = state.borrow();
-                state
-                    .files
-                    .get(&path)
-                    .map(|file| Box::new(file.clone()) as Box<File>)
-                    .ok_or(io::Error::new(io::ErrorKind::NotFound, "Path not found"))
-                    .into_future()
-            }))
-        }
-    }
+//     impl FileProvider for TestFileProvider {
+//         fn open(
+//             &self,
+//             path: &cross_platform::Path,
+//         ) -> Box<Future<Item = Box<File>, Error = io::Error>> {
+//             let path = path.to_path_buf();
+//             let state = self.0.clone();
+//             Box::new(NextTick::new().then(move |_| {
+//                 let state = state.borrow();
+//                 state
+//                     .files
+//                     .get(&path)
+//                     .map(|file| Box::new(file.clone()) as Box<File>)
+//                     .ok_or(io::Error::new(io::ErrorKind::NotFound, "Path not found"))
+//                     .into_future()
+//             }))
+//         }
+//     }
 
-    impl File for TestFile {
-        fn id(&self) -> FileId {
-            self.0.borrow().id
-        }
+//     impl File for TestFile {
+//         fn id(&self) -> FileId {
+//             self.0.borrow().id
+//         }
 
-        fn read(&self) -> Box<Future<Item = String, Error = io::Error>> {
-            let file = self.0.clone();
-            Box::new(NextTick::new().then(move |_| {
-                let file = file.borrow();
-                future::ok(file.content.clone())
-            }))
-        }
+//         fn read(&self) -> Box<Future<Item = String, Error = io::Error>> {
+//             let file = self.0.clone();
+//             Box::new(NextTick::new().then(move |_| {
+//                 let file = file.borrow();
+//                 future::ok(file.content.clone())
+//             }))
+//         }
 
-        fn write_snapshot(
-            &self,
-            snapshot: BufferSnapshot,
-        ) -> Box<Future<Item = (), Error = io::Error>> {
-            let file = self.0.clone();
-            Box::new(NextTick::new().then(move |_| {
-                let mut file = file.borrow_mut();
-                file.content = snapshot.to_string();
-                future::ok(())
-            }))
-        }
-    }
+//         fn write_u16_chars(&self, _text: Vec<u16>) -> Box<Future<Item = (), Error = io::Error>> {
+//             unimplemented!()
+//         }
+//     }
 
-    impl NextTick {
-        fn new() -> Self {
-            NextTick(false)
-        }
-    }
+//     impl NextTick {
+//         fn new() -> Self {
+//             NextTick(false)
+//         }
+//     }
 
-    impl Future for NextTick {
-        type Item = ();
-        type Error = Never;
+//     impl Future for NextTick {
+//         type Item = ();
+//         type Error = Never;
 
-        fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-            if self.0 {
-                Ok(Async::Ready(()))
-            } else {
-                self.0 = true;
-                task::current().notify();
-                Ok(Async::NotReady)
-            }
-        }
-    }
-}
+//         fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+//             if self.0 {
+//                 Ok(Async::Ready(()))
+//             } else {
+//                 self.0 = true;
+//                 task::current().notify();
+//                 Ok(Async::NotReady)
+//             }
+//         }
+//     }
+// }

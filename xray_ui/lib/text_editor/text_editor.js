@@ -464,7 +464,7 @@ class TextEditor extends React.Component {
         );
       }
 
-      this.props.horizontal_autoscroll = null;
+      // this.props.horizontal_autoscroll = null;
     }
   }
 

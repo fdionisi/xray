@@ -126,6 +126,7 @@ class Renderer {
     this.gl.enable(this.gl.BLEND);
     this.atlas = new Atlas(gl, style);
     this.style = style;
+    this.userColors = new Map()
 
     const textBlendVertexShader = this.createShader(
       shaders.textBlendVertex,
@@ -761,6 +762,24 @@ class Renderer {
     glyphInstances[11 + startOffset] = glyph.textureHeight;
   }
 
+  getUserColorIndex(userId, selectionColors) {
+    if (this.userColors.has(userId)) {
+      return this.userColors.get(userId)
+    }
+    
+    if (!userId) {
+      const colorIndex = 0
+      this.userColors.set(userId, colorIndex)
+      
+      return colorIndex
+    }
+
+    const colorIndex =  Math.ceil(Math.random() * (selectionColors.length - 1))
+    this.userColors.set(userId, colorIndex)
+    
+    return colorIndex
+  }
+
   populateSelectionSolidInstances(
     scrollTop,
     canvasWidth,
@@ -779,7 +798,7 @@ class Renderer {
 
     for (var i = 0; i < selections.length; i++) {
       const selection = selections[i];
-      const colorIndex = selection.user_id % selectionColors.length;
+      const colorIndex = this.getUserColorIndex(selection.user_id, selectionColors);
       const selectionColor = selectionColors[colorIndex];
       const cursorColor = cursorColors[colorIndex];
 

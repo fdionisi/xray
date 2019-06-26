@@ -7,13 +7,13 @@ pub fn left(buffer: &Buffer, mut point: Point) -> Point {
         point.column -= 1;
     } else if point.row > 0 {
         point.row -= 1;
-        point.column = buffer.len_for_row(point.row).unwrap();
+        point.column = buffer.len_for_row(point.row);
     }
     point
 }
 
 pub fn right(buffer: &Buffer, mut point: Point) -> Point {
-    let max_column = buffer.len_for_row(point.row).unwrap();
+    let max_column = buffer.len_for_row(point.row);
     if point.column < max_column {
         point.column += 1;
     } else if point.row < buffer.max_point().row {
@@ -27,7 +27,7 @@ pub fn up(buffer: &Buffer, mut point: Point, goal_column: Option<u32>) -> (Point
     let goal_column = goal_column.or(Some(point.column));
     if point.row > 0 {
         point.row -= 1;
-        point.column = cmp::min(goal_column.unwrap(), buffer.len_for_row(point.row).unwrap());
+        point.column = cmp::min(goal_column.unwrap(), buffer.len_for_row(point.row));
     } else {
         point = Point::new(0, 0);
     }
@@ -40,7 +40,7 @@ pub fn down(buffer: &Buffer, mut point: Point, goal_column: Option<u32>) -> (Poi
     let max_point = buffer.max_point();
     if point.row < max_point.row {
         point.row += 1;
-        point.column = cmp::min(goal_column.unwrap(), buffer.len_for_row(point.row).unwrap())
+        point.column = cmp::min(goal_column.unwrap(), buffer.len_for_row(point.row))
     } else {
         point = max_point;
     }
@@ -50,7 +50,7 @@ pub fn down(buffer: &Buffer, mut point: Point, goal_column: Option<u32>) -> (Poi
 
 pub fn beginning_of_word(buffer: &Buffer, mut point: Point) -> Point {
     // TODO: remove this once the iterator returns char instances.
-    let mut iter = decode_utf16(buffer.backward_iter_starting_at_point(point)).map(|c| c.unwrap());
+    let mut iter = decode_utf16(buffer.backward_iter_at_point(point)).map(|c| c.unwrap());
     let skip_alphanumeric = iter.next().map_or(false, |c| c.is_alphanumeric());
     point = left(buffer, point);
     for character in iter {
@@ -65,7 +65,7 @@ pub fn beginning_of_word(buffer: &Buffer, mut point: Point) -> Point {
 
 pub fn end_of_word(buffer: &Buffer, mut point: Point) -> Point {
     // TODO: remove this once the iterator returns char instances.
-    let mut iter = decode_utf16(buffer.iter_starting_at_point(point)).map(|c| c.unwrap());
+    let mut iter = decode_utf16(buffer.iter_at_point(point)).map(|c| c.unwrap());
     let skip_alphanumeric = iter.next().map_or(false, |c| c.is_alphanumeric());
     point = right(buffer, point);
     for character in iter {
@@ -84,6 +84,6 @@ pub fn beginning_of_line(mut point: Point) -> Point {
 }
 
 pub fn end_of_line(buffer: &Buffer, mut point: Point) -> Point {
-    point.column = buffer.len_for_row(point.row).unwrap();
+    point.column = buffer.len_for_row(point.row);
     point
 }

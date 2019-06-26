@@ -916,7 +916,11 @@ impl Epoch {
                 }
                 _ => {
                     return Err(Error::InvalidPath(
-                        format!("path {:?} contains unrecognized components", path).into(),
+                        format!(
+                            "path {:?} contains unrecognized components: {:?}",
+                            path, component
+                        )
+                        .into(),
                     ));
                 }
             }
@@ -976,6 +980,14 @@ impl Epoch {
         }
     }
 
+    pub fn iter_at_point(&self, file_id: FileId, point: Point) -> Result<buffer::Iter, Error> {
+        if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
+            Ok(buffer.iter_at_point(point))
+        } else {
+            Err(Error::InvalidFileId("file has not been opened".into()))
+        }
+    }
+
     pub fn selections_changed_since(
         &self,
         file_id: FileId,
@@ -1010,6 +1022,48 @@ impl Epoch {
 
     pub fn file_type(&self, file_id: FileId) -> Result<FileType, Error> {
         Ok(self.metadata(file_id)?.file_type)
+    }
+
+    // new
+
+    pub fn max_point(&self, file_id: FileId) -> Result<Point, Error> {
+        if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
+            Ok(buffer.max_point())
+        } else {
+            Err(Error::InvalidFileId("file has not been opened".into()))
+        }
+    }
+
+    pub fn longest_row(&self, file_id: FileId) -> Result<u32, Error> {
+        if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
+            Ok(buffer.longest_row())
+        } else {
+            Err(Error::InvalidFileId("file has not been opened".into()))
+        }
+    }
+
+    pub fn line(&self, file_id: FileId, row: u32) -> Result<Vec<u16>, Error> {
+        if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
+            buffer.line(row)
+        } else {
+            Err(Error::InvalidFileId("file has not been opened".into()))
+        }
+    }
+
+    pub fn len(&self, file_id: FileId) -> Result<usize, Error> {
+        if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
+            Ok(buffer.len())
+        } else {
+            Err(Error::InvalidFileId("file has not been opened".into()))
+        }
+    }
+
+    pub fn len_for_row(&self, file_id: FileId, row: u32) -> Result<u32, Error> {
+        if let Some(TextFile::Buffered(buffer)) = self.text_files.get(&file_id) {
+            buffer.len_for_row(row)
+        } else {
+            Err(Error::InvalidFileId("file has not been opened".into()))
+        }
     }
 
     fn metadata(&self, file_id: FileId) -> Result<Metadata, Error> {

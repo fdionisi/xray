@@ -1,6 +1,7 @@
-use serde_json;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+
+use serde_json;
 use xray_core::{ViewId, WindowId, WindowUpdate};
 
 #[derive(Deserialize, Debug)]

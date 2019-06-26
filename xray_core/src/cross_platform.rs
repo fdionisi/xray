@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 #[cfg(unix)]
 use std::ffi::{OsStr, OsString};
-#[cfg(unix)]
 use std::path::PathBuf;
 
 pub const UNIX_MAIN_SEPARATOR: u8 = b'/';
@@ -75,6 +74,19 @@ impl Path {
         if let Some(ref path) = self.0 {
             match path {
                 &PathState::Unix(ref chars) => OsStr::from_bytes(chars).into(),
+            }
+        } else {
+            PathBuf::new()
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn to_path_buf(&self) -> PathBuf {
+        if let Some(ref path) = self.0 {
+            match path {
+                &PathState::Unix(ref chars) => {
+                    PathBuf::from(String::from_utf8(chars.to_vec()).unwrap())
+                }
             }
         } else {
             PathBuf::new()

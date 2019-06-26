@@ -1,21 +1,23 @@
-use buffer::{self, Buffer, BufferId, Point, Selection, SelectionSetId};
-use futures::{Future, Poll, Stream};
-use movement;
-use notify_cell::NotifyCell;
-use serde_json;
-use std::cell::{Cell, Ref, RefCell};
+use std::cell::{Cell, RefCell};
 use std::cmp::{self, Ordering};
+use std::io;
 use std::ops::Range;
 use std::rc::Rc;
+
+use futures::{Future, IntoFuture, Poll, Stream};
+use serde_json;
+
+use buffer::{Buffer, BufferId, Point, SelectionSetId};
+use movement;
+use notify_cell::NotifyCell;
 use window::{View, WeakViewHandle, Window};
-use UserId;
+use ReplicaId;
 
 pub trait BufferViewDelegate {
     fn set_active_buffer_view(&mut self, buffer_view: WeakViewHandle<BufferView>);
 }
 
 pub struct BufferView {
-    user_id: UserId,
     buffer: Rc<RefCell<Buffer>>,
     updates_tx: NotifyCell<()>,
     updates_rx: Box<Stream<Item = (), Error = ()>>,
@@ -28,13 +30,13 @@ pub struct BufferView {
     vertical_margin: u32,
     horizontal_margin: u32,
     vertical_autoscroll: Option<AutoScrollRequest>,
-    horizontal_autoscroll: Cell<Option<Range<buffer::Anchor>>>,
+    horizontal_autoscroll: Cell<Option<Range<Point>>>,
     delegate: Option<WeakViewHandle<BufferViewDelegate>>,
 }
 
 #[derive(Debug, Eq, PartialEq, Serialize)]
 struct SelectionProps {
-    pub user_id: UserId,
+    pub user_id: Option<ReplicaId>,
     pub start: Point,
     pub end: Point,
     pub reversed: bool,
@@ -92,35 +94,23 @@ enum BufferViewAction {
 }
 
 struct AutoScrollRequest {
-    range: Range<buffer::Anchor>,
+    range: Range<Point>,
     center: bool,
 }
 
 impl BufferView {
     pub fn new(
         buffer: Rc<RefCell<Buffer>>,
-        user_id: UserId,
         delegate: Option<WeakViewHandle<BufferViewDelegate>>,
     ) -> Self {
         let selection_set_id = {
-            let mut buffer = buffer.borrow_mut();
-            let start = buffer.anchor_before_offset(0).unwrap();
-            let end = buffer.anchor_before_offset(0).unwrap();
-            buffer.add_selection_set(
-                user_id,
-                vec![Selection {
-                    start,
-                    end,
-                    reversed: false,
-                    goal_column: None,
-                }],
-            )
+            let mut buffer = buffer.borrow();
+            buffer.add_selection_set(vec![Point::zero()..Point::zero()])
         };
 
         let updates_tx = NotifyCell::new(());
         let updates_rx = Box::new(updates_tx.observe().select(buffer.borrow().updates()));
         Self {
-            user_id,
             updates_tx,
             updates_rx,
             buffer,
@@ -180,49 +170,70 @@ impl BufferView {
         self.scroll_top() + self.height.unwrap_or(0.0)
     }
 
-    pub fn save(&self) -> Option<Box<Future<Item = (), Error = buffer::Error>>> {
-        self.buffer.borrow().save()
+    pub fn save(&self) -> Box<Future<Item = (), Error = io::Error>> {
+        Box::new(
+            self.buffer
+                .borrow()
+                .save()
+                .unwrap()
+                .map_err(|err| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("BufferView().save(): error={:?}", err),
+                    )
+                })
+                .into_future(),
+        )
     }
 
     pub fn edit(&mut self, text: &str) {
         {
-            let mut offset_ranges = Vec::new();
-            {
-                let buffer = self.buffer.borrow();
-                for selection in self.selections().iter() {
-                    let start = buffer.offset_for_anchor(&selection.start).unwrap();
-                    let end = buffer.offset_for_anchor(&selection.end).unwrap();
-                    offset_ranges.push(start..end);
-                }
-            }
+            let buffer = self.buffer.borrow();
 
-            let mut buffer = self.buffer.borrow_mut();
-            buffer.edit(&offset_ranges, text);
+            let offset_ranges = self
+                .selections()
+                .iter()
+                .map(|selection| {
+                    let reversed = selection.end < selection.start;
 
-            let text_char_length = text.chars().count();
-            let mut delta = 0_isize;
+                    let start = if reversed {
+                        selection.end
+                    } else {
+                        selection.start
+                    };
+
+                    let end = if reversed {
+                        selection.start
+                    } else {
+                        selection.end
+                    };
+
+                    start..end
+                })
+                .collect::<Vec<Range<Point>>>();
+
+            buffer.edit(offset_ranges, text);
+
             buffer
-                .mutate_selections(self.selection_set_id, |buffer, selections| {
-                    *selections = offset_ranges
+                .mutate_selections(self.selection_set_id, |_, selections| {
+                    selections
                         .into_iter()
                         .map(|range| {
-                            let start = range.start as isize;
-                            let end = range.end as isize;
-                            let anchor = buffer
-                                .anchor_before_offset((start + delta) as usize + text_char_length)
-                                .unwrap();
-                            let deleted_count = end - start;
-                            delta += text_char_length as isize - deleted_count;
-                            Selection {
-                                start: anchor.clone(),
-                                end: anchor,
-                                reversed: false,
-                                goal_column: None,
-                            }
+                            let mut point = cmp::min(range.start, range.end);
+
+                            let lines = text.split('\n').collect::<Vec<&str>>();
+                            let num_lines = lines.len() as u32 - 1;
+                            let last_line = *lines.last().unwrap();
+
+                            point = Point::new(
+                                point.row + num_lines,
+                                point.column + (last_line.len() as u32),
+                            );
+
+                            point..point
                         })
-                        .collect();
-                })
-                .unwrap();
+                        .collect()
+                });
         }
 
         self.autoscroll_to_cursor(false);
@@ -244,52 +255,20 @@ impl BufferView {
     }
 
     fn all_selections_are_empty(&self) -> bool {
-        let buffer = self.buffer.borrow();
         self.selections()
             .iter()
-            .all(|selection| selection.is_empty(&buffer))
-    }
-
-    pub fn set_selected_anchor_range(
-        &mut self,
-        range: Range<buffer::Anchor>,
-    ) -> Result<(), buffer::Error> {
-        {
-            let mut buffer = self.buffer.borrow_mut();
-            // Ensure the supplied anchors are valid to preserve invariants.
-            buffer.offset_for_anchor(&range.start)?;
-            buffer.offset_for_anchor(&range.end)?;
-            buffer.mutate_selections(self.selection_set_id, |_, selections| {
-                selections.clear();
-                selections.push(Selection {
-                    start: range.start,
-                    end: range.end,
-                    reversed: false,
-                    goal_column: None,
-                });
-            })?;
-        }
-        self.autoscroll_to_selection(true);
-        self.updated();
-        Ok(())
+            .all(|selection| selection.start == selection.end)
     }
 
     pub fn set_cursor_position(&mut self, position: Point, autoscroll: bool) {
         let position = self.buffer.borrow().clip_point(position);
 
         self.buffer
-            .borrow_mut()
-            .mutate_selections(self.selection_set_id, |buffer, selections| {
-                let anchor = buffer.anchor_before_point(position).unwrap();
-                selections.clear();
-                selections.push(Selection {
-                    start: anchor.clone(),
-                    end: anchor,
-                    reversed: false,
-                    goal_column: None,
-                });
-            })
-            .unwrap();
+            .borrow()
+            .mutate_selections(self.selection_set_id, |_buffer, _selections| {
+                vec![position..position]
+            });
+
         if autoscroll {
             self.autoscroll_to_cursor(false);
         }
@@ -297,52 +276,36 @@ impl BufferView {
 
     pub fn add_selection(&mut self, start: Point, end: Point) {
         debug_assert!(start <= end); // TODO: Reverse selection if end < start
+        {
+            let buffer = self.buffer.borrow();
+            let start = buffer.clip_point(start);
+            let end = buffer.clip_point(end);
 
-        let start = self.buffer.borrow().clip_point(start);
-        let end = self.buffer.borrow().clip_point(end);
-        self.buffer
-            .borrow_mut()
-            .mutate_selections(self.selection_set_id, |buffer, selections| {
-                let start_anchor = buffer.anchor_before_point(start).unwrap();
-                let end_anchor = buffer.anchor_before_point(end).unwrap();
+            buffer.add_selection_set(vec![Range { start, end }]);
+        }
 
-                let index = match selections.binary_search_by(|probe| {
-                    buffer.cmp_anchors(&probe.start, &start_anchor).unwrap()
-                }) {
-                    Ok(index) => index,
-                    Err(index) => index,
-                };
-                selections.insert(
-                    index,
-                    Selection {
-                        start: start_anchor,
-                        end: end_anchor,
-                        reversed: false,
-                        goal_column: None,
-                    },
-                );
-            })
-            .unwrap();
         self.autoscroll_to_cursor(false);
     }
 
     pub fn add_selection_above(&mut self) {
         self.buffer
-            .borrow_mut()
-            .insert_selections(self.selection_set_id, |buffer, selections| {
+            .borrow()
+            .mutate_selections(self.selection_set_id, |buffer, selections| {
                 let mut new_selections = Vec::new();
+                
                 for selection in selections.iter() {
-                    let selection_start = buffer.point_for_anchor(&selection.start).unwrap();
-                    let selection_end = buffer.point_for_anchor(&selection.end).unwrap();
+                    let selection_start = selection.start;
+                    let selection_end = selection.end;
+                    
                     if selection_start.row != selection_end.row {
                         continue;
                     }
 
-                    let goal_column = selection.goal_column.unwrap_or(selection_end.column);
+                    let goal_column = selection_end.column;
                     let mut row = selection_start.row;
                     while row > 0 {
                         row -= 1;
-                        let max_column = buffer.len_for_row(row).unwrap();
+                        let max_column = buffer.len_for_row(row);
 
                         let start_column;
                         let end_column;
@@ -358,45 +321,37 @@ impl BufferView {
                         }
 
                         if add_selection {
-                            new_selections.push(Selection {
-                                start: buffer
-                                    .anchor_before_point(Point::new(row, start_column))
-                                    .unwrap(),
-                                end: buffer
-                                    .anchor_before_point(Point::new(row, end_column))
-                                    .unwrap(),
-                                reversed: selection.reversed,
-                                goal_column: Some(goal_column),
-                            });
+                            new_selections.push(selection.start..selection.end);
+                            new_selections.push(Point::new(row, start_column)..Point::new(row, end_column));
                             break;
                         }
                     }
                 }
                 new_selections
-            })
-            .unwrap();
+            });
+
         self.autoscroll_to_cursor(false);
     }
 
     pub fn add_selection_below(&mut self) {
         self.buffer
-            .borrow_mut()
-            .insert_selections(self.selection_set_id, |buffer, selections| {
+            .borrow()
+            .mutate_selections(self.selection_set_id, |buffer, selections| {
                 let max_row = buffer.max_point().row;
 
                 let mut new_selections = Vec::new();
                 for selection in selections.iter() {
-                    let selection_start = buffer.point_for_anchor(&selection.start).unwrap();
-                    let selection_end = buffer.point_for_anchor(&selection.end).unwrap();
+                    let selection_start = selection.start;
+                    let selection_end = selection.end;
                     if selection_start.row != selection_end.row {
                         continue;
                     }
 
-                    let goal_column = selection.goal_column.unwrap_or(selection_end.column);
+                    let goal_column = selection_end.column;
                     let mut row = selection_start.row;
                     while row < max_row {
                         row += 1;
-                        let max_column = buffer.len_for_row(row).unwrap();
+                        let max_column = buffer.len_for_row(row);
 
                         let start_column;
                         let end_column;
@@ -412,435 +367,381 @@ impl BufferView {
                         }
 
                         if add_selection {
-                            new_selections.push(Selection {
-                                start: buffer
-                                    .anchor_before_point(Point::new(row, start_column))
-                                    .unwrap(),
-                                end: buffer
-                                    .anchor_before_point(Point::new(row, end_column))
-                                    .unwrap(),
-                                reversed: selection.reversed,
-                                goal_column: Some(goal_column),
-                            });
+                            new_selections.push(selection.start..selection.end);
+                            new_selections.push(Point::new(row, start_column)..Point::new(row, end_column));
                             break;
                         }
                     }
                 }
+
                 new_selections
-            })
-            .unwrap();
+            });
+
         self.autoscroll_to_cursor(false);
     }
 
     pub fn move_left(&mut self) {
         self.buffer
-            .borrow_mut()
+            .borrow()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let start = buffer.point_for_anchor(&selection.start).unwrap();
-                    let end = buffer.point_for_anchor(&selection.end).unwrap();
+                selections
+                    .iter()
+                    .map(|selection| {
+                        if selection.start != selection.end {
+                            selection.end..selection.end
+                        } else {
+                            let point = movement::left(&buffer, selection.end);
+                            point..point
+                        }
+                    })
+                    .collect()
+            });
 
-                    if start != end {
-                        selection.end = selection.start.clone();
-                    } else {
-                        let cursor = buffer
-                            .anchor_before_point(movement::left(&buffer, start))
-                            .unwrap();
-                        selection.start = cursor.clone();
-                        selection.end = cursor;
-                    }
-                    selection.reversed = false;
-                    selection.goal_column = None;
-                }
-            })
-            .unwrap();
         self.autoscroll_to_cursor(false);
     }
 
     pub fn select_left(&mut self) {
         self.buffer
-            .borrow_mut()
+            .borrow()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let head = buffer.point_for_anchor(selection.head()).unwrap();
-                    let cursor = buffer
-                        .anchor_before_point(movement::left(&buffer, head))
-                        .unwrap();
-                    selection.set_head(&buffer, cursor);
-                    selection.goal_column = None;
-                }
-            })
-            .unwrap();
+                selections
+                    .iter()
+                    .map(|selection| selection.start..movement::left(&buffer, selection.end))
+                    .collect()
+            });
+
         self.autoscroll_to_cursor(false);
     }
 
     pub fn move_right(&mut self) {
         self.buffer
-            .borrow_mut()
+            .borrow()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let start = buffer.point_for_anchor(&selection.start).unwrap();
-                    let end = buffer.point_for_anchor(&selection.end).unwrap();
+                selections
+                    .iter()
+                    .map(|selection| {
+                        if selection.start != selection.end {
+                            selection.end..selection.end
+                        } else {
+                            let point = movement::right(&buffer, selection.end);
+                            point..point
+                        }
+                    })
+                    .collect()
+            });
 
-                    if start != end {
-                        selection.start = selection.end.clone();
-                    } else {
-                        let cursor = buffer
-                            .anchor_before_point(movement::right(&buffer, end))
-                            .unwrap();
-                        selection.start = cursor.clone();
-                        selection.end = cursor;
-                    }
-                    selection.reversed = false;
-                    selection.goal_column = None;
-                }
-            })
-            .unwrap();
         self.autoscroll_to_cursor(false);
     }
 
     pub fn select_right(&mut self) {
         self.buffer
-            .borrow_mut()
+            .borrow()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let head = buffer.point_for_anchor(selection.head()).unwrap();
-                    let cursor = buffer
-                        .anchor_before_point(movement::right(&buffer, head))
-                        .unwrap();
-                    selection.set_head(&buffer, cursor);
-                    selection.goal_column = None;
-                }
-            })
-            .unwrap();
+                selections
+                    .iter()
+                    .map(|selection| selection.start..movement::right(&buffer, selection.end))
+                    .collect()
+            });
+
         self.autoscroll_to_cursor(false);
     }
 
     pub fn select_to(&mut self, position: Point) {
         self.buffer
-            .borrow_mut()
-            .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let anchor = buffer.anchor_before_point(position).unwrap();
-                    selection.set_head(buffer, anchor);
-                    selection.goal_column = None;
-                }
-            })
-            .unwrap();
+            .borrow()
+            .mutate_selections(self.selection_set_id, |_buffer, selections| {
+                selections
+                    .iter()
+                    .map(|selection| selection.start..position)
+                    .collect()
+            });
+
         self.autoscroll_to_cursor(false);
     }
 
     pub fn move_up(&mut self) {
         self.buffer
-            .borrow_mut()
+            .borrow()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let start = buffer.point_for_anchor(&selection.start).unwrap();
-                    let end = buffer.point_for_anchor(&selection.end).unwrap();
-                    if start != end {
-                        selection.goal_column = None;
-                    }
+                selections
+                    .iter()
+                    .map(|selection| {
+                        let (point, _) = movement::up(&buffer, selection.end, Some(selection.start.column));
 
-                    let (start, goal_column) = movement::up(&buffer, start, selection.goal_column);
-                    let cursor = buffer.anchor_before_point(start).unwrap();
-                    selection.start = cursor.clone();
-                    selection.end = cursor;
-                    selection.goal_column = goal_column;
-                    selection.reversed = false;
-                }
-            })
-            .unwrap();
+                        point..point
+                    })
+                    .collect()
+            });
+
         self.autoscroll_to_cursor(false);
     }
 
     pub fn select_up(&mut self) {
         self.buffer
-            .borrow_mut()
+            .borrow()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let head = buffer.point_for_anchor(selection.head()).unwrap();
-                    let (head, goal_column) = movement::up(&buffer, head, selection.goal_column);
-                    selection.set_head(&buffer, buffer.anchor_before_point(head).unwrap());
-                    selection.goal_column = goal_column;
-                }
-            })
-            .unwrap();
+                selections
+                    .iter()
+                    .map(|selection| {
+                        let (end, _) = movement::up(&buffer, selection.end, Some(selection.start.column));
+                        selection.start..end
+                    })
+                    .collect()
+            });
+
         self.autoscroll_to_cursor(false);
     }
 
     pub fn move_down(&mut self) {
         self.buffer
-            .borrow_mut()
+            .borrow()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let start = buffer.point_for_anchor(&selection.start).unwrap();
-                    let end = buffer.point_for_anchor(&selection.end).unwrap();
-                    if start != end {
-                        selection.goal_column = None;
-                    }
+                selections
+                    .iter()
+                    .map(|selection| {
+                        let (point, _) = movement::down(&buffer, selection.end, Some(selection.start.column));
 
-                    let (start, goal_column) = movement::down(&buffer, end, selection.goal_column);
-                    let cursor = buffer.anchor_before_point(start).unwrap();
-                    selection.start = cursor.clone();
-                    selection.end = cursor;
-                    selection.goal_column = goal_column;
-                    selection.reversed = false;
-                }
-            })
-            .unwrap();
+                        point..point
+                    })
+                    .collect()
+            });
+
         self.autoscroll_to_cursor(false);
     }
 
     pub fn select_down(&mut self) {
         self.buffer
-            .borrow_mut()
+            .borrow()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let head = buffer.point_for_anchor(selection.head()).unwrap();
-                    let (head, goal_column) = movement::down(&buffer, head, selection.goal_column);
-                    selection.set_head(&buffer, buffer.anchor_before_point(head).unwrap());
-                    selection.goal_column = goal_column;
-                }
-            })
-            .unwrap();
+                selections
+                    .iter()
+                    .map(|selection| {
+                        let (end, _) = movement::down(&buffer, selection.end, Some(selection.start.column));
+                        selection.start..end
+                    })
+                    .collect()
+            });
+
         self.autoscroll_to_cursor(false);
     }
 
     pub fn move_to_beginning_of_word(&mut self) {
         self.buffer
-            .borrow_mut()
+            .borrow()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let old_head = buffer.point_for_anchor(selection.head()).unwrap();
-                    let new_head = movement::beginning_of_word(buffer, old_head);
-                    let anchor = buffer.anchor_before_point(new_head).unwrap();
-                    selection.start = anchor.clone();
-                    selection.end = anchor;
-                    selection.goal_column = None;
-                    selection.reversed = false;
-                }
-            })
-            .unwrap();
+                selections
+                    .iter()
+                    .map(|selection| {
+                        let point = movement::beginning_of_word(buffer, selection.end);
+                        point..point
+                    })
+                    .collect()
+            });
+
         self.autoscroll_to_cursor(false);
     }
 
     pub fn move_to_end_of_word(&mut self) {
         self.buffer
-            .borrow_mut()
+            .borrow()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let old_head = buffer.point_for_anchor(selection.head()).unwrap();
-                    let new_head = movement::end_of_word(buffer, old_head);
-                    let anchor = buffer.anchor_before_point(new_head).unwrap();
-                    selection.start = anchor.clone();
-                    selection.end = anchor;
-                    selection.goal_column = None;
-                    selection.reversed = false;
-                }
-            })
-            .unwrap();
+                selections
+                    .iter()
+                    .map(|selection| {
+                        let point = movement::end_of_word(buffer, selection.end);
+                        point..point
+                    })
+                    .collect()
+            });
+
         self.autoscroll_to_cursor(false);
     }
 
     pub fn select_to_beginning_of_word(&mut self) {
         self.buffer
-            .borrow_mut()
+            .borrow()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let old_head = buffer.point_for_anchor(selection.head()).unwrap();
-                    let new_head = movement::beginning_of_word(buffer, old_head);
-                    let anchor = buffer.anchor_before_point(new_head).unwrap();
-                    selection.set_head(buffer, anchor);
-                    selection.goal_column = None;
-                }
-            })
-            .unwrap();
+                selections
+                    .iter()
+                    .map(|selection| {
+                        let point = movement::beginning_of_word(buffer, selection.end);
+                        selection.start..point
+                    })
+                    .collect()
+            });
+
         self.autoscroll_to_cursor(false);
     }
 
     pub fn select_to_end_of_word(&mut self) {
         self.buffer
-            .borrow_mut()
+            .borrow()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let old_head = buffer.point_for_anchor(selection.head()).unwrap();
-                    let new_head = movement::end_of_word(buffer, old_head);
-                    let anchor = buffer.anchor_before_point(new_head).unwrap();
-                    selection.set_head(buffer, anchor);
-                    selection.goal_column = None;
-                }
-            })
-            .unwrap();
+                selections
+                    .iter()
+                    .map(|selection| {
+                        let point = movement::end_of_word(buffer, selection.end);
+                        selection.start..point
+                    })
+                    .collect()
+            });
+
         self.autoscroll_to_cursor(false);
     }
 
     pub fn select_word(&mut self) {
         self.buffer
-            .borrow_mut()
+            .borrow()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let old_head = buffer.point_for_anchor(selection.head()).unwrap();
-                    let new_start = movement::beginning_of_word(buffer, old_head);
-                    let new_end = movement::end_of_word(buffer, new_start);
-                    selection.start = buffer.anchor_before_point(new_start).unwrap();
-                    selection.end = buffer.anchor_before_point(new_end).unwrap();
-                    selection.reversed = false;
-                    selection.goal_column = None;
-                }
-            })
-            .unwrap();
+                selections
+                    .iter()
+                    .map(|selection| {
+                        let beginning = movement::beginning_of_word(buffer, selection.end);
+                        let end = movement::end_of_word(buffer, selection.end);
+
+                        beginning..end
+                    })
+                    .collect()
+            });
     }
 
     pub fn move_to_beginning_of_line(&mut self) {
         self.buffer
-            .borrow_mut()
-            .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let old_head = buffer.point_for_anchor(selection.head()).unwrap();
-                    let new_head = movement::beginning_of_line(old_head);
-                    let anchor = buffer.anchor_before_point(new_head).unwrap();
-                    selection.start = anchor.clone();
-                    selection.end = anchor;
-                    selection.goal_column = None;
-                    selection.reversed = false;
-                }
-            })
-            .unwrap();
+            .borrow()
+            .mutate_selections(self.selection_set_id, |_buffer, selections| {
+                selections
+                    .iter()
+                    .map(|selection| {
+                        let new_head = movement::beginning_of_line(selection.end);
+                        new_head..new_head
+                    })
+                    .collect()
+            });
+
         self.autoscroll_to_cursor(false);
     }
 
     pub fn move_to_end_of_line(&mut self) {
         self.buffer
-            .borrow_mut()
+            .borrow()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let old_head = buffer.point_for_anchor(selection.head()).unwrap();
-                    let new_head = movement::end_of_line(buffer, old_head);
-                    let anchor = buffer.anchor_before_point(new_head).unwrap();
-                    selection.start = anchor.clone();
-                    selection.end = anchor;
-                    selection.goal_column = None;
-                    selection.reversed = false;
-                }
-            })
-            .unwrap();
+                selections
+                    .iter()
+                    .map(|selection| {
+                        let new_head = movement::end_of_line(buffer, selection.end);
+                        new_head..new_head
+                    })
+                    .collect()
+            });
+
         self.autoscroll_to_cursor(false);
     }
 
     pub fn select_to_beginning_of_line(&mut self) {
         self.buffer
-            .borrow_mut()
-            .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let old_head = buffer.point_for_anchor(selection.head()).unwrap();
-                    let new_head = movement::beginning_of_line(old_head);
-                    let anchor = buffer.anchor_before_point(new_head).unwrap();
-                    selection.set_head(buffer, anchor);
-                    selection.goal_column = None;
-                }
-            })
-            .unwrap();
+            .borrow()
+            .mutate_selections(self.selection_set_id, |_buffer, selections| {
+                selections
+                    .iter()
+                    .map(|selection| selection.start..movement::beginning_of_line(selection.end))
+                    .collect()
+            });
+
         self.autoscroll_to_cursor(false);
     }
 
     pub fn select_to_end_of_line(&mut self) {
         self.buffer
-            .borrow_mut()
+            .borrow()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let old_head = buffer.point_for_anchor(selection.head()).unwrap();
-                    let new_head = movement::end_of_line(buffer, old_head);
-                    let anchor = buffer.anchor_before_point(new_head).unwrap();
-                    selection.set_head(buffer, anchor);
-                    selection.goal_column = None;
-                }
-            })
-            .unwrap();
+                selections
+                    .iter()
+                    .map(|selection| selection.start..movement::end_of_line(buffer, selection.end))
+                    .collect()
+            });
+
         self.autoscroll_to_cursor(false);
     }
 
     pub fn select_line(&mut self) {
         self.buffer
-            .borrow_mut()
+            .borrow()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
                 let max_point = buffer.max_point();
-                for selection in selections.iter_mut() {
-                    let old_head = buffer.point_for_anchor(selection.head()).unwrap();
-                    let new_start = movement::beginning_of_line(old_head);
-                    let new_end = cmp::min(Point::new(new_start.row + 1, 0), max_point);
-                    selection.start = buffer.anchor_before_point(new_start).unwrap();
-                    selection.end = buffer.anchor_before_point(new_end).unwrap();
-                    selection.reversed = false;
-                    selection.goal_column = None;
-                }
-            })
-            .unwrap();
+                selections
+                    .iter()
+                    .map(|selection| {
+                        let new_start = movement::beginning_of_line(selection.end);
+                        let new_end = cmp::min(Point::new(new_start.row + 1, 0), max_point);
+                        new_start..new_end
+                    })
+                    .collect()
+            });
     }
 
     pub fn move_to_top(&mut self) {
         self.buffer
-            .borrow_mut()
-            .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let anchor = buffer.anchor_before_point(Point::new(0, 0)).unwrap();
-                    selection.start = anchor.clone();
-                    selection.end = anchor;
-                    selection.goal_column = None;
-                    selection.reversed = false;
-                }
-            })
-            .unwrap();
+            .borrow()
+            .mutate_selections(self.selection_set_id, |_, selections| {
+                selections
+                    .iter()
+                    .map(|_| {
+                        let point = Point::zero();
+                        point..point
+                    })
+                    .collect()
+            });
+
         self.autoscroll_to_cursor(false);
     }
 
     pub fn move_to_bottom(&mut self) {
         self.buffer
-            .borrow_mut()
+            .borrow()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let anchor = buffer.anchor_before_point(buffer.max_point()).unwrap();
-                    selection.start = anchor.clone();
-                    selection.end = anchor;
-                    selection.goal_column = None;
-                    selection.reversed = false;
-                }
-            })
-            .unwrap();
+                selections
+                    .iter()
+                    .map(|_| {
+                        let point = buffer.max_point();
+                        point..point
+                    })
+                    .collect()
+            });
+
         self.autoscroll_to_cursor(false);
     }
 
     pub fn select_to_top(&mut self) {
         self.buffer
-            .borrow_mut()
-            .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let anchor = buffer.anchor_before_point(Point::new(0, 0)).unwrap();
-                    selection.set_head(buffer, anchor);
-                    selection.goal_column = None;
-                }
-            })
-            .unwrap();
+            .borrow()
+            .mutate_selections(self.selection_set_id, |_buffer, selections| {
+                selections
+                    .iter()
+                    .map(|selection| selection.start..Point::zero())
+                    .collect()
+            });
+
         self.autoscroll_to_cursor(false);
     }
 
     pub fn select_to_bottom(&mut self) {
         self.buffer
-            .borrow_mut()
+            .borrow()
             .mutate_selections(self.selection_set_id, |buffer, selections| {
-                for selection in selections.iter_mut() {
-                    let anchor = buffer.anchor_before_point(buffer.max_point()).unwrap();
-                    selection.set_head(buffer, anchor);
-                    selection.goal_column = None;
-                }
-            })
-            .unwrap();
+                selections
+                    .iter()
+                    .map(|selection| selection.start..buffer.max_point())
+                    .collect()
+            });
+
         self.autoscroll_to_cursor(false);
     }
 
-    pub fn selections(&self) -> Ref<[Selection]> {
-        Ref::map(self.buffer.borrow(), |buffer| {
-            buffer.selections(self.selection_set_id).unwrap()
-        })
+    pub fn selections(&self) -> Vec<Range<Point>> {
+        self.buffer
+            .borrow()
+            .selections(self.selection_set_id)
+            .clone()
     }
 
     pub fn buffer_id(&self) -> BufferId {
@@ -852,27 +753,19 @@ impl BufferView {
         let mut rendered_selections = Vec::new();
 
         for (user_id, selections) in buffer.remote_selections() {
-            for selection in self.query_selections(selections, &range) {
-                rendered_selections.push(SelectionProps {
-                    user_id,
-                    start: buffer.point_for_anchor(&selection.start).unwrap(),
-                    end: buffer.point_for_anchor(&selection.end).unwrap(),
-                    reversed: selection.reversed,
-                    remote: true,
-                });
+            for remote_selection in selections {
+                for selection in self.query_selections(&remote_selection, &range) {
+                    let mut selection_prop = SelectionProps::from(selection);
+                    selection_prop.set_user_id(user_id);
+                    selection_prop.set_remote(true);
+
+                    rendered_selections.push(selection_prop);
+                }
             }
         }
 
-        for selection in
-            self.query_selections(&buffer.selections(self.selection_set_id).unwrap(), &range)
-        {
-            rendered_selections.push(SelectionProps {
-                user_id: self.user_id,
-                start: buffer.point_for_anchor(&selection.start).unwrap(),
-                end: buffer.point_for_anchor(&selection.end).unwrap(),
-                reversed: selection.reversed,
-                remote: false,
-            });
+        for selection in self.query_selections(&buffer.selections(self.selection_set_id), &range) {
+            rendered_selections.push(SelectionProps::from(selection));
         }
 
         rendered_selections
@@ -880,21 +773,15 @@ impl BufferView {
 
     fn query_selections<'a>(
         &self,
-        selections: &'a [Selection],
+        selections: &'a [Range<Point>],
         range: &Range<Point>,
-    ) -> &'a [Selection] {
+    ) -> &'a [Range<Point>] {
         let buffer = self.buffer.borrow();
-        let start = buffer.anchor_before_point(range.start).unwrap();
-        let start_index = match selections
-            .binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &start).unwrap())
-        {
+        let start = range.start;
+        let start_index = match selections.binary_search_by(|probe| probe.start.cmp(&start)) {
             Ok(index) => index,
             Err(index) => {
-                if index > 0
-                    && buffer
-                        .cmp_anchors(&selections[index - 1].end, &start)
-                        .unwrap() == Ordering::Greater
-                {
+                if index > 0 && selections[index - 1].end.cmp(&start) == Ordering::Greater {
                     index - 1
                 } else {
                     index
@@ -905,10 +792,8 @@ impl BufferView {
         if range.end > buffer.max_point() {
             &selections[start_index..]
         } else {
-            let end = buffer.anchor_after_point(range.end).unwrap();
-            let end_index = match selections
-                .binary_search_by(|probe| buffer.cmp_anchors(&probe.start, &end).unwrap())
-            {
+            let end = range.end;
+            let end_index = match selections.binary_search_by(|probe| probe.start.cmp(&end)) {
                 Ok(index) => index,
                 Err(index) => index,
             };
@@ -921,59 +806,34 @@ impl BufferView {
         let anchor = {
             let selections = self.selections();
             let selection = selections.last().unwrap();
-            if selection.reversed {
-                selection.start.clone()
-            } else {
-                selection.end.clone()
-            }
+            selection.end
         };
 
-        self.autoscroll_to_range(anchor.clone()..anchor, center)
-            .unwrap();
-    }
-
-    fn autoscroll_to_selection(&mut self, center: bool) {
-        let range = {
-            let selections = self.selections();
-            let selection = selections.last().unwrap();
-            selection.start.clone()..selection.end.clone()
-        };
-
-        self.autoscroll_to_range(range, center).unwrap();
+        self.autoscroll_to_range(anchor..anchor, center)
     }
 
     fn flush_vertical_autoscroll_to_selection(&mut self) {
         if let Some(request) = self.vertical_autoscroll.take() {
             self.autoscroll_to_range(request.range, request.center)
-                .unwrap();
         }
     }
 
-    fn autoscroll_to_range(
-        &mut self,
-        range: Range<buffer::Anchor>,
-        center: bool,
-    ) -> Result<(), buffer::Error> {
+    fn autoscroll_to_range(&mut self, range: Range<Point>, center: bool) {
         // Ensure points are valid even if we can't autoscroll immediately because
         // flush_vertical_autoscroll_to_selection unwraps.
-        let (start, end) = {
-            let buffer = self.buffer.borrow();
-            let start = buffer.point_for_anchor(&range.start)?;
-            let end = buffer.point_for_anchor(&range.end)?;
-            (start, end)
-        };
         if let Some(height) = self.height {
             let desired_top;
             let desired_bottom;
             if center {
-                let center_position = ((start.row + end.row) as f64 / 2_f64) * self.line_height;
+                let center_position =
+                    ((range.start.row + range.end.row) as f64 / 2_f64) * self.line_height;
                 desired_top = 0_f64.max(center_position - height / 2_f64);
                 desired_bottom = center_position + height / 2_f64;
             } else {
                 desired_top =
-                    start.row.saturating_sub(self.vertical_margin) as f64 * self.line_height;
+                    range.start.row.saturating_sub(self.vertical_margin) as f64 * self.line_height;
                 desired_bottom =
-                    end.row.saturating_add(self.vertical_margin) as f64 * self.line_height;
+                    range.end.row.saturating_add(self.vertical_margin) as f64 * self.line_height;
             }
 
             if self.scroll_top() > desired_top {
@@ -987,8 +847,6 @@ impl BufferView {
             self.vertical_autoscroll = Some(AutoScrollRequest { range, center });
             self.horizontal_autoscroll.replace(None);
         }
-
-        Ok(())
     }
 
     fn updated(&mut self) {
@@ -1017,7 +875,7 @@ impl View for BufferView {
         let mut lines = Vec::new();
         let mut cur_line = Vec::new();
         let mut cur_row = start.row;
-        for c in buffer.iter_starting_at_point(start) {
+        for c in buffer.iter_at_point(start) {
             if c == u16::from(b'\n') {
                 lines.push(String::from_utf16_lossy(&cur_line));
                 cur_line = Vec::new();
@@ -1037,21 +895,21 @@ impl View for BufferView {
         let longest_line = if start.row <= longest_row && longest_row < end.row {
             lines[(longest_row - start.row) as usize].clone()
         } else {
-            String::from_utf16_lossy(&buffer.line(buffer.longest_row()).unwrap())
+            String::from_utf16_lossy(&buffer.line(buffer.longest_row()))
         };
 
         let horizontal_autoscroll = self.horizontal_autoscroll.take().map(|range| {
-            let scroll_start = buffer.point_for_anchor(&range.start).unwrap();
-            let scroll_end = buffer.point_for_anchor(&range.end).unwrap();
+            let scroll_start = range.start;
+            let scroll_end = range.end;
             let start_line = if start.row <= scroll_start.row && scroll_start.row <= end.row {
                 lines[(scroll_start.row - start.row) as usize].clone()
             } else {
-                String::from_utf16_lossy(&buffer.line(scroll_start.row).unwrap())
+                String::from_utf16_lossy(&buffer.line(scroll_start.row))
             };
             let end_line = if start.row <= scroll_end.row && scroll_end.row <= end.row {
                 lines[(scroll_end.row - start.row) as usize].clone()
             } else {
-                String::from_utf16_lossy(&buffer.line(scroll_end.row).unwrap())
+                String::from_utf16_lossy(&buffer.line(scroll_end.row))
             };
 
             json!({
@@ -1107,10 +965,9 @@ impl View for BufferView {
             Ok(BufferViewAction::SelectDown) => self.select_down(),
             Ok(BufferViewAction::SelectLeft) => self.select_left(),
             Ok(BufferViewAction::SelectRight) => self.select_right(),
-            Ok(BufferViewAction::SelectTo {
-                row,
-                column
-            }) => self.select_to(Point::new(row, column)),
+            Ok(BufferViewAction::SelectTo { row, column }) => {
+                self.select_to(Point::new(row, column))
+            }
             Ok(BufferViewAction::SelectToBeginningOfWord) => self.select_to_beginning_of_word(),
             Ok(BufferViewAction::SelectToEndOfWord) => self.select_to_end_of_word(),
             Ok(BufferViewAction::SelectToBeginningOfLine) => self.select_to_beginning_of_line(),
@@ -1143,913 +1000,1019 @@ impl Stream for BufferView {
 impl Drop for BufferView {
     fn drop(&mut self) {
         self.buffer
-            .borrow_mut()
-            .remove_selection_set(self.selection_set_id)
-            .unwrap();
+            .borrow()
+            .remove_selection_set(self.selection_set_id);
+
         self.dropped.set(true);
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use IntoShared;
-
-    #[test]
-    fn test_cursor_movement() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor.buffer.borrow_mut().edit(&[0..0], "abc");
-        editor.buffer.borrow_mut().edit(&[3..3], "\n");
-        editor.buffer.borrow_mut().edit(&[4..4], "\ndef");
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
-
-        editor.move_right();
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 1)]);
-
-        // Wraps across lines moving right
-        for _ in 0..3 {
-            editor.move_right();
-        }
-        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
-
-        // Stops at end
-        for _ in 0..4 {
-            editor.move_right();
-        }
-        assert_eq!(render_selections(&editor), vec![empty_selection(2, 3)]);
-
-        // Wraps across lines moving left
-        for _ in 0..4 {
-            editor.move_left();
-        }
-        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
-
-        // Stops at start
-        for _ in 0..4 {
-            editor.move_left();
-        }
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
-
-        // Moves down and up at column 0
-        editor.move_down();
-        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
-        editor.move_up();
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
-
-        // Maintains a goal column when moving down
-        // This means we'll jump to the column we started with even after crossing a shorter line
-        editor.move_right();
-        editor.move_right();
-        editor.move_down();
-        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
-        editor.move_down();
-        assert_eq!(render_selections(&editor), vec![empty_selection(2, 2)]);
-
-        // Jumps to end when moving down on the last line.
-        editor.move_down();
-        assert_eq!(render_selections(&editor), vec![empty_selection(2, 3)]);
-
-        // Stops at end
-        editor.move_down();
-        assert_eq!(render_selections(&editor), vec![empty_selection(2, 3)]);
-
-        // Resets the goal column when moving horizontally
-        editor.move_left();
-        editor.move_left();
-        editor.move_up();
-        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
-        editor.move_up();
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 1)]);
-
-        // Jumps to start when moving up on the first line
-        editor.move_up();
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
-
-        // Preserves goal column after jumping to start/end
-        editor.move_down();
-        editor.move_down();
-        assert_eq!(render_selections(&editor), vec![empty_selection(2, 1)]);
-        editor.move_down();
-        assert_eq!(render_selections(&editor), vec![empty_selection(2, 3)]);
-        editor.move_up();
-        editor.move_up();
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 1)]);
+impl SelectionProps {
+    fn set_user_id(&mut self, user_id: ReplicaId) {
+        self.user_id = Some(user_id)
     }
 
-    #[test]
-    fn test_selection_movement() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor.buffer.borrow_mut().edit(&[0..0], "abc");
-        editor.buffer.borrow_mut().edit(&[3..3], "\n");
-        editor.buffer.borrow_mut().edit(&[4..4], "\ndef");
-
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
-
-        editor.select_right();
-        assert_eq!(render_selections(&editor), vec![selection((0, 0), (0, 1))]);
-
-        // Selecting right wraps across newlines
-        for _ in 0..3 {
-            editor.select_right();
-        }
-        assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 0))]);
-
-        // Moving right with a non-empty selection clears the selection
-        editor.move_right();
-        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
-        editor.move_right();
-        assert_eq!(render_selections(&editor), vec![empty_selection(2, 0)]);
-
-        // Selecting left wraps across newlines
-        editor.select_left();
-        assert_eq!(
-            render_selections(&editor),
-            vec![rev_selection((1, 0), (2, 0))]
-        );
-        editor.select_left();
-        assert_eq!(
-            render_selections(&editor),
-            vec![rev_selection((0, 3), (2, 0))]
-        );
-
-        // Moving left with a non-empty selection clears the selection
-        editor.move_left();
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 3)]);
-
-        // Reverse is updated correctly when selecting left and right
-        editor.select_left();
-        assert_eq!(
-            render_selections(&editor),
-            vec![rev_selection((0, 2), (0, 3))]
-        );
-        editor.select_right();
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 3)]);
-        editor.select_right();
-        assert_eq!(render_selections(&editor), vec![selection((0, 3), (1, 0))]);
-        editor.select_left();
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 3)]);
-        editor.select_left();
-        assert_eq!(
-            render_selections(&editor),
-            vec![rev_selection((0, 2), (0, 3))]
-        );
-
-        // Selecting vertically moves the head and updates the reversed property
-        editor.select_left();
-        assert_eq!(
-            render_selections(&editor),
-            vec![rev_selection((0, 1), (0, 3))]
-        );
-        editor.select_down();
-        assert_eq!(render_selections(&editor), vec![selection((0, 3), (1, 0))]);
-        editor.select_down();
-        assert_eq!(render_selections(&editor), vec![selection((0, 3), (2, 1))]);
-        editor.select_up();
-        editor.select_up();
-        assert_eq!(
-            render_selections(&editor),
-            vec![rev_selection((0, 1), (0, 3))]
-        );
-
-        // Favors selection end when moving down
-        editor.move_down();
-        editor.move_down();
-        assert_eq!(render_selections(&editor), vec![empty_selection(2, 3)]);
-
-        // Favors selection start when moving up
-        editor.move_left();
-        editor.move_left();
-        editor.select_right();
-        editor.select_right();
-        assert_eq!(render_selections(&editor), vec![selection((2, 1), (2, 3))]);
-        editor.move_up();
-        editor.move_up();
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 1)]);
-
-        // Select to a direct point in front of cursor position
-        editor.select_to(Point::new(1, 0));
-        assert_eq!(render_selections(&editor), vec![selection((0, 1), (1, 0))]);
-        editor.move_right(); // cancel selection
-        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
-        editor.move_right();
-        editor.move_right();
-        assert_eq!(render_selections(&editor), vec![empty_selection(2, 1)]);
-
-        // Selection can even go to a point before the cursor (with reverse)
-        editor.select_to(Point::new(0, 0));
-        assert_eq!(render_selections(&editor), vec![rev_selection((0, 0), (2, 1))]);
-
-        // A selection can switch to a new point and the selection will update
-        editor.select_to(Point::new(0, 3));
-        assert_eq!(render_selections(&editor), vec![rev_selection((0, 3), (2, 1))]);
-
-        // A selection can even swing around the cursor without having to unselect
-        editor.select_to(Point::new(2, 3));
-        assert_eq!(render_selections(&editor), vec![selection((2, 1), (2, 3))]);
+    fn set_remote(&mut self, remote: bool) {
+        self.remote = remote
     }
+}
 
-    #[test]
-    fn test_move_to_beginning_or_end_of_word() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor.buffer.borrow_mut().edit(&[0..0], "abc def\nghi.jkl");
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
-
-        editor.move_to_end_of_word();
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 3)]);
-        editor.move_to_end_of_word();
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 4)]);
-        editor.move_to_end_of_word();
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 7)]);
-        editor.move_to_end_of_word();
-        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
-        editor.move_to_end_of_word();
-        assert_eq!(render_selections(&editor), vec![empty_selection(1, 3)]);
-        editor.move_to_end_of_word();
-        assert_eq!(render_selections(&editor), vec![empty_selection(1, 4)]);
-        editor.move_to_end_of_word();
-        assert_eq!(render_selections(&editor), vec![empty_selection(1, 7)]);
-        editor.move_to_end_of_word();
-        assert_eq!(render_selections(&editor), vec![empty_selection(1, 7)]);
-
-        editor.move_to_beginning_of_word();
-        assert_eq!(render_selections(&editor), vec![empty_selection(1, 4)]);
-        editor.move_to_beginning_of_word();
-        assert_eq!(render_selections(&editor), vec![empty_selection(1, 3)]);
-        editor.move_to_beginning_of_word();
-        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
-        editor.move_to_beginning_of_word();
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 7)]);
-        editor.move_to_beginning_of_word();
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 4)]);
-        editor.move_to_beginning_of_word();
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 3)]);
-        editor.move_to_beginning_of_word();
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
-        editor.move_to_beginning_of_word();
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
-    }
-
-    #[test]
-    fn test_select_to_beginning_or_end_of_word() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor.buffer.borrow_mut().edit(&[0..0], "abc def\nghi.jkl");
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
-
-        editor.select_to_end_of_word();
-        assert_eq!(render_selections(&editor), vec![selection((0, 0), (0, 3))]);
-        editor.select_to_end_of_word();
-        assert_eq!(render_selections(&editor), vec![selection((0, 0), (0, 4))]);
-        editor.select_to_end_of_word();
-        assert_eq!(render_selections(&editor), vec![selection((0, 0), (0, 7))]);
-        editor.select_to_end_of_word();
-        assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 0))]);
-        editor.select_to_end_of_word();
-        assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 3))]);
-        editor.select_to_end_of_word();
-        assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 4))]);
-        editor.select_to_end_of_word();
-        assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 7))]);
-        editor.select_to_end_of_word();
-        assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 7))]);
-
-        editor.move_right();
-        assert_eq!(render_selections(&editor), vec![empty_selection(1, 7)]);
-
-        editor.select_to_beginning_of_word();
-        assert_eq!(
-            render_selections(&editor),
-            vec![rev_selection((1, 4), (1, 7))]
-        );
-        editor.select_to_beginning_of_word();
-        assert_eq!(
-            render_selections(&editor),
-            vec![rev_selection((1, 3), (1, 7))]
-        );
-        editor.select_to_beginning_of_word();
-        assert_eq!(
-            render_selections(&editor),
-            vec![rev_selection((1, 0), (1, 7))]
-        );
-        editor.select_to_beginning_of_word();
-        assert_eq!(
-            render_selections(&editor),
-            vec![rev_selection((0, 7), (1, 7))]
-        );
-        editor.select_to_beginning_of_word();
-        assert_eq!(
-            render_selections(&editor),
-            vec![rev_selection((0, 4), (1, 7))]
-        );
-        editor.select_to_beginning_of_word();
-        assert_eq!(
-            render_selections(&editor),
-            vec![rev_selection((0, 3), (1, 7))]
-        );
-        editor.select_to_beginning_of_word();
-        assert_eq!(
-            render_selections(&editor),
-            vec![rev_selection((0, 0), (1, 7))]
-        );
-        editor.select_to_beginning_of_word();
-        assert_eq!(
-            render_selections(&editor),
-            vec![rev_selection((0, 0), (1, 7))]
-        );
-    }
-
-    #[test]
-    fn test_move_to_beginning_or_end_of_line() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor
-            .buffer
-            .borrow_mut()
-            .edit(&[0..0], "abcdef\nghijklmno");
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
-
-        editor.move_to_end_of_line();
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 6)]);
-        editor.move_to_end_of_line();
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 6)]);
-        editor.move_right();
-        editor.move_to_end_of_line();
-        assert_eq!(render_selections(&editor), vec![empty_selection(1, 9)]);
-
-        editor.move_to_beginning_of_line();
-        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
-        editor.move_to_beginning_of_line();
-        assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
-        editor.move_left();
-        editor.move_to_beginning_of_line();
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
-    }
-
-    #[test]
-    fn test_select_to_beginning_or_end_of_line() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor
-            .buffer
-            .borrow_mut()
-            .edit(&[0..0], "abcdef\nghijklmno");
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
-
-        editor.select_to_end_of_line();
-        assert_eq!(render_selections(&editor), vec![selection((0, 0), (0, 6))]);
-        editor.select_to_end_of_line();
-        assert_eq!(render_selections(&editor), vec![selection((0, 0), (0, 6))]);
-        editor.move_right();
-        editor.move_right();
-        editor.select_to_end_of_line();
-        assert_eq!(render_selections(&editor), vec![selection((1, 0), (1, 9))]);
-
-        editor.move_right();
-        editor.select_to_beginning_of_line();
-        assert_eq!(
-            render_selections(&editor),
-            vec![rev_selection((1, 0), (1, 9))]
-        );
-        editor.select_to_beginning_of_line();
-        assert_eq!(
-            render_selections(&editor),
-            vec![rev_selection((1, 0), (1, 9))]
-        );
-        editor.move_left();
-        editor.move_left();
-        editor.select_to_beginning_of_line();
-        assert_eq!(
-            render_selections(&editor),
-            vec![rev_selection((0, 0), (0, 6))]
-        );
-    }
-
-    #[test]
-    fn test_select_word() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor.buffer.borrow_mut().edit(&[0..0], "abc.def---ghi");
-
-        editor.set_cursor_position(Point::new(0, 5), false);
-        editor.select_word();
-        assert_eq!(render_selections(&editor), vec![selection((0, 4), (0, 7))]);
-
-        editor.set_cursor_position(Point::new(0, 8), false);
-        editor.select_word();
-        assert_eq!(render_selections(&editor), vec![selection((0, 7), (0, 10))]);
-    }
-
-    #[test]
-    fn test_select_line() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor.buffer.borrow_mut().edit(&[0..0], "abc\ndef\nghi");
-
-        editor.set_cursor_position(Point::new(0, 2), false);
-        editor.select_line();
-        assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 0))]);
-
-        editor.set_cursor_position(Point::new(2, 1), false);
-        editor.select_line();
-        assert_eq!(render_selections(&editor), vec![selection((2, 0), (2, 3))]);
-    }
-
-    #[test]
-    fn test_move_to_top_or_bottom() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor.buffer.borrow_mut().edit(&[0..0], "abc\ndef\nghi");
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
-
-        editor.move_to_bottom();
-        assert_eq!(render_selections(&editor), vec![empty_selection(2, 3)]);
-        editor.move_to_top();
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
-    }
-
-    #[test]
-    fn test_select_to_top_or_bottom() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor.buffer.borrow_mut().edit(&[0..0], "abc\ndef\nghi");
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
-
-        editor.select_to_bottom();
-        assert_eq!(render_selections(&editor), vec![selection((0, 0), (2, 3))]);
-
-        editor.move_right();
-        editor.select_to_top();
-        assert_eq!(
-            render_selections(&editor),
-            vec![rev_selection((0, 0), (2, 3))]
-        );
-    }
-
-    #[test]
-    fn test_backspace() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor.buffer.borrow_mut().edit(&[0..0], "abcdefghi");
-        editor.add_selection(Point::new(0, 3), Point::new(0, 4));
-        editor.add_selection(Point::new(0, 9), Point::new(0, 9));
-        editor.backspace();
-        assert_eq!(editor.buffer.borrow().to_string(), "abcefghi");
-        editor.backspace();
-        assert_eq!(editor.buffer.borrow().to_string(), "abefgh");
-    }
-
-    #[test]
-    fn test_delete() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor.buffer.borrow_mut().edit(&[0..0], "abcdefghi");
-        editor.add_selection(Point::new(0, 3), Point::new(0, 4));
-        editor.add_selection(Point::new(0, 9), Point::new(0, 9));
-        editor.delete();
-        assert_eq!(editor.buffer.borrow().to_string(), "abcefghi");
-        editor.delete();
-        assert_eq!(editor.buffer.borrow().to_string(), "bcfghi");
-    }
-
-    #[test]
-    fn test_add_selection() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor
-            .buffer
-            .borrow_mut()
-            .edit(&[0..0], "abcd\nefgh\nijkl\nmnop");
-        assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
-
-        // Adding non-overlapping selections
-        editor.move_right();
-        editor.move_right();
-        editor.add_selection(Point::new(0, 0), Point::new(0, 1));
-        editor.add_selection(Point::new(2, 2), Point::new(2, 3));
-        editor.add_selection(Point::new(0, 3), Point::new(1, 2));
-        assert_eq!(
-            render_selections(&editor),
-            vec![
-                selection((0, 0), (0, 1)),
-                selection((0, 2), (0, 2)),
-                selection((0, 3), (1, 2)),
-                selection((2, 2), (2, 3)),
-            ]
-        );
-
-        // Adding a selection that starts at the start of an existing selection
-        editor.add_selection(Point::new(0, 3), Point::new(1, 0));
-        editor.add_selection(Point::new(0, 3), Point::new(1, 3));
-        editor.add_selection(Point::new(0, 3), Point::new(1, 2));
-
-        assert_eq!(
-            render_selections(&editor),
-            vec![
-                selection((0, 0), (0, 1)),
-                selection((0, 2), (0, 2)),
-                selection((0, 3), (1, 3)),
-                selection((2, 2), (2, 3)),
-            ]
-        );
-
-        // Adding a selection that starts or ends inside an existing selection
-        editor.add_selection(Point::new(0, 1), Point::new(0, 2));
-        editor.add_selection(Point::new(1, 2), Point::new(1, 4));
-        editor.add_selection(Point::new(2, 1), Point::new(2, 2));
-        assert_eq!(
-            render_selections(&editor),
-            vec![
-                selection((0, 0), (0, 2)),
-                selection((0, 3), (1, 4)),
-                selection((2, 1), (2, 3)),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_add_selection_above() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor.buffer.borrow_mut().edit(
-            &[0..0],
-            "\
-             abcdefghijk\n\
-             lmnop\n\
-             \n\
-             \n\
-             qrstuvwxyz\n\
-             ",
-        );
-
-        // Multi-line selections
-        editor.move_down();
-        editor.move_right();
-        editor.move_right();
-        editor.select_down();
-        editor.select_down();
-        editor.select_down();
-        editor.select_right();
-        editor.select_right();
-        editor.add_selection_above();
-        assert_eq!(render_selections(&editor), vec![selection((1, 2), (4, 4))]);
-
-        // Single-line selections
-        editor.move_up();
-        editor.move_left();
-        editor.move_left();
-        editor.add_selection(Point::new(2, 0), Point::new(2, 0));
-        editor.add_selection(Point::new(4, 1), Point::new(4, 3));
-        editor.add_selection(Point::new(4, 6), Point::new(4, 6));
-        editor.add_selection(Point::new(4, 7), Point::new(4, 9));
-        editor.add_selection_above();
-        assert_eq!(
-            render_selections(&editor),
-            vec![
-                selection((0, 0), (0, 0)),
-                selection((0, 7), (0, 9)),
-                selection((1, 0), (1, 0)),
-                selection((1, 1), (1, 3)),
-                selection((1, 5), (1, 5)),
-                selection((2, 0), (2, 0)),
-                selection((4, 1), (4, 3)),
-                selection((4, 6), (4, 6)),
-                selection((4, 7), (4, 9)),
-            ]
-        );
-
-        editor.add_selection_above();
-        assert_eq!(
-            render_selections(&editor),
-            vec![
-                selection((0, 0), (0, 0)),
-                selection((0, 1), (0, 3)),
-                selection((0, 6), (0, 6)),
-                selection((0, 7), (0, 9)),
-                selection((1, 0), (1, 0)),
-                selection((1, 1), (1, 3)),
-                selection((1, 5), (1, 5)),
-                selection((2, 0), (2, 0)),
-                selection((4, 1), (4, 3)),
-                selection((4, 6), (4, 6)),
-                selection((4, 7), (4, 9)),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_add_selection_below() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor.buffer.borrow_mut().edit(
-            &[0..0],
-            "\
-             abcdefgh\n\
-             ijklm\n\
-             \n\
-             \n\
-             nopqrstuvwx\n\
-             yz\
-             ",
-        );
-
-        // Multi-line selections
-        editor.select_down();
-        editor.select_down();
-        editor.select_down();
-        editor.select_down();
-        editor.select_right();
-        editor.add_selection_below();
-        assert_eq!(render_selections(&editor), vec![selection((0, 0), (4, 1))]);
-
-        // Single-line selections
-        editor.move_left();
-        editor.add_selection(Point::new(0, 1), Point::new(0, 1));
-        editor.add_selection(Point::new(0, 4), Point::new(0, 8));
-        editor.add_selection(Point::new(4, 5), Point::new(4, 6));
-        editor.add_selection_below();
-        assert_eq!(
-            render_selections(&editor),
-            vec![
-                selection((0, 0), (0, 0)),
-                selection((0, 1), (0, 1)),
-                selection((0, 4), (0, 8)),
-                selection((1, 0), (1, 0)),
-                selection((1, 1), (1, 1)),
-                selection((1, 4), (1, 5)),
-                selection((4, 5), (4, 6)),
-            ]
-        );
-
-        editor.add_selection_below();
-        assert_eq!(
-            render_selections(&editor),
-            vec![
-                selection((0, 0), (0, 0)),
-                selection((0, 1), (0, 1)),
-                selection((0, 4), (0, 8)),
-                selection((1, 0), (1, 0)),
-                selection((1, 1), (1, 1)),
-                selection((1, 4), (1, 5)),
-                selection((2, 0), (2, 0)),
-                selection((4, 1), (4, 1)),
-                selection((4, 4), (4, 8)),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_set_cursor_position() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor.buffer.borrow_mut().edit(&[0..0], "abc\ndef\nghi");
-        editor.add_selection_below();
-        editor.add_selection_below();
-        assert_eq!(
-            render_selections(&editor),
-            vec![
-                empty_selection(0, 0),
-                empty_selection(1, 0),
-                empty_selection(2, 0),
-            ]
-        );
-
-        editor.set_cursor_position(Point::new(1, 2), false);
-        assert_eq!(render_selections(&editor), vec![empty_selection(1, 2)]);
-    }
-
-    #[test]
-    fn test_edit() {
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-
-        editor
-            .buffer
-            .borrow_mut()
-            .edit(&[0..0], "abcdefgh\nhijklmno");
-
-        // Three selections on the same line
-        editor.select_right();
-        editor.select_right();
-        editor.add_selection(Point::new(0, 3), Point::new(0, 5));
-        editor.add_selection(Point::new(0, 7), Point::new(1, 1));
-        editor.edit("-");
-        assert_eq!(editor.buffer.borrow().to_string(), "-c-fg-ijklmno");
-        assert_eq!(
-            render_selections(&editor),
-            vec![
-                selection((0, 1), (0, 1)),
-                selection((0, 3), (0, 3)),
-                selection((0, 6), (0, 6)),
-            ]
-        );
-
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor
-            .buffer
-            .borrow_mut()
-            .edit(&[0..0], "123");
-
-        editor.edit("ä");
-        editor.edit("a");
-
-        assert_eq!(editor.buffer.borrow().to_string(), "äa123");
-        assert_eq!(
-            render_selections(&editor),
-            vec![
-                selection((0, 2), (0, 2)),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_autoscroll() {
-        let mut buffer = Buffer::new(0);
-        buffer.edit(&[0..0], "abc\ndef\nghi\njkl\nmno\npqr\nstu\nvwx\nyz");
-        let start = buffer.anchor_before_offset(0).unwrap();
-        let end = buffer.anchor_before_offset(buffer.len()).unwrap();
-        let max_point = buffer.max_point();
-        let mut editor = BufferView::new(buffer.into_shared(), 0, None);
-        let line_height = 5.0;
-        let height = 3.0 * line_height;
-        editor
-            .set_height(height)
-            .set_line_height(line_height)
-            .set_scroll_top(2.5 * line_height);
-        assert_eq!(editor.scroll_top(), 2.5 * line_height);
-
-        editor
-            .autoscroll_to_range(start.clone()..start.clone(), true)
-            .unwrap();
-        assert_eq!(editor.scroll_top(), 0.0);
-        editor
-            .autoscroll_to_range(end.clone()..end.clone(), true)
-            .unwrap();
-        assert_eq!(
-            editor.scroll_top(),
-            (max_point.row as f64 * line_height) - (height / 2.0)
-        );
-    }
-
-    #[test]
-    fn test_render() {
-        let buffer = Rc::new(RefCell::new(Buffer::new(0)));
-        buffer
-            .borrow_mut()
-            .edit(&[0..0], "abc\ndef\nghi\njkl\nmno\npqr\nstu\nvwx\nyz");
-        let line_height = 6.0;
-
-        {
-            let mut editor = BufferView::new(buffer.clone(), 0, None);
-            // Selections starting or ending outside viewport
-            editor.add_selection(Point::new(1, 2), Point::new(3, 1));
-            editor.add_selection(Point::new(5, 2), Point::new(6, 0));
-            // Selection fully inside viewport
-            editor.add_selection(Point::new(3, 2), Point::new(4, 1));
-            // Selection fully outside viewport
-            editor.add_selection(Point::new(6, 3), Point::new(7, 2));
-            editor
-                .set_height(3.0 * line_height)
-                .set_line_height(line_height)
-                .set_scroll_top(2.5 * line_height);
-
-            let frame = editor.render();
-            assert_eq!(frame["first_visible_row"], 2);
-            assert_eq!(
-                stringify_lines(&frame["lines"]),
-                vec!["ghi", "jkl", "mno", "pqr"]
-            );
-            assert_eq!(
-                frame["selections"],
-                json!([
-                    selection((1, 2), (3, 1)),
-                    selection((3, 2), (4, 1)),
-                    selection((5, 2), (6, 0)),
-                ])
-            );
-        }
-
-        // Selection starting at the end of buffer
-        {
-            let mut editor = BufferView::new(buffer.clone(), 0, None);
-            editor.add_selection(Point::new(8, 2), Point::new(8, 2));
-            editor
-                .set_height(8.0 * line_height)
-                .set_line_height(line_height)
-                .set_scroll_top(1.0 * line_height);
-
-            let frame = editor.render();
-            assert_eq!(frame["first_visible_row"], 1);
-            assert_eq!(
-                stringify_lines(&frame["lines"]),
-                vec!["def", "ghi", "jkl", "mno", "pqr", "stu", "vwx", "yz"]
-            );
-            assert_eq!(frame["selections"], json!([selection((8, 2), (8, 2))]));
-        }
-
-        // Selection ending exactly at first visible row
-        {
-            let mut editor = BufferView::new(buffer.clone(), 0, None);
-            editor.add_selection(Point::new(0, 2), Point::new(1, 0));
-            editor
-                .set_height(3.0 * line_height)
-                .set_line_height(line_height)
-                .set_scroll_top(1.0 * line_height);
-
-            let frame = editor.render();
-            assert_eq!(frame["first_visible_row"], 1);
-            assert_eq!(stringify_lines(&frame["lines"]), vec!["def", "ghi", "jkl"]);
-            assert_eq!(frame["selections"], json!([]));
-        }
-    }
-
-    #[test]
-    fn test_longest_line_in_frame() {
-        let buffer = Rc::new(RefCell::new(Buffer::new(0)));
-        buffer
-            .borrow_mut()
-            .edit(&[0..0], "1\n1\n1\n1\n11\n1\n1");
-        let line_height = 6.0;
-
-        let mut editor = BufferView::new(buffer.clone(), 0, None);
-        editor
-            .set_height(2.0 * line_height)
-            .set_line_height(line_height)
-            .set_scroll_top(2.0 * line_height);
-        
-        let _ = editor.render();
-    }
-
-    #[test]
-    fn test_render_past_last_line() {
-        let line_height = 4.0;
-        let mut editor = BufferView::new(Rc::new(RefCell::new(Buffer::new(0))), 0, None);
-        editor.buffer.borrow_mut().edit(&[0..0], "abc\ndef\nghi");
-        editor.add_selection(Point::new(2, 3), Point::new(2, 3));
-        editor
-            .set_height(3.0 * line_height)
-            .set_line_height(line_height)
-            .set_scroll_top(2.0 * line_height);
-
-        let frame = editor.render();
-        assert_eq!(frame["first_visible_row"], 2);
-        assert_eq!(stringify_lines(&frame["lines"]), vec!["ghi"]);
-        assert_eq!(frame["selections"], json!([selection((2, 3), (2, 3))]));
-
-        editor.set_scroll_top(3.0 * line_height);
-        let frame = editor.render();
-        assert_eq!(frame["first_visible_row"], 2);
-        assert_eq!(stringify_lines(&frame["lines"]), vec!["ghi"]);
-        assert_eq!(frame["selections"], json!([selection((2, 3), (2, 3))]));
-    }
-
-    #[test]
-    fn test_dropping_view_removes_selection_set() {
-        let buffer = Buffer::new(0).into_shared();
-        let editor = BufferView::new(buffer.clone(), 0, None);
-        let selection_set_id = editor.selection_set_id;
-        assert!(buffer.borrow_mut().selections(selection_set_id).is_ok());
-
-        drop(editor);
-        assert!(buffer.borrow_mut().selections(selection_set_id).is_err());
-    }
-
-    fn stringify_lines(lines: &serde_json::Value) -> Vec<String> {
-        lines
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|line| line.as_str().unwrap().into())
-            .collect()
-    }
-
-    fn render_selections(editor: &BufferView) -> Vec<SelectionProps> {
-        let buffer = editor.buffer.borrow();
-        editor
-            .selections()
-            .iter()
-            .map(|s| SelectionProps {
-                user_id: 0,
-                start: buffer.point_for_anchor(&s.start).unwrap(),
-                end: buffer.point_for_anchor(&s.end).unwrap(),
-                reversed: s.reversed,
-                remote: false,
-            })
-            .collect()
-    }
-
-    fn empty_selection(row: u32, column: u32) -> SelectionProps {
+impl Default for SelectionProps {
+    fn default() -> SelectionProps {
         SelectionProps {
-            user_id: 0,
-            start: Point::new(row, column),
-            end: Point::new(row, column),
+            user_id: None,
+            start: Point::zero(),
+            end: Point::zero(),
             reversed: false,
-            remote: false,
-        }
-    }
-
-    fn selection(start: (u32, u32), end: (u32, u32)) -> SelectionProps {
-        SelectionProps {
-            user_id: 0,
-            start: Point::new(start.0, start.1),
-            end: Point::new(end.0, end.1),
-            reversed: false,
-            remote: false,
-        }
-    }
-
-    fn rev_selection(start: (u32, u32), end: (u32, u32)) -> SelectionProps {
-        SelectionProps {
-            user_id: 0,
-            start: Point::new(start.0, start.1),
-            end: Point::new(end.0, end.1),
-            reversed: true,
             remote: false,
         }
     }
 }
+
+impl From<&Range<Point>> for SelectionProps {
+    fn from(range: &Range<Point>) -> SelectionProps {
+        let reversed = range.end < range.start;
+        SelectionProps {
+            start: if reversed { range.end } else { range.start },
+            end: if reversed { range.start } else { range.end },
+            reversed,
+            ..Default::default()
+        }
+    }
+}
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
+//     use buffer::tests::build_base_buffer_id;
+//     use IntoShared;
+
+//     #[test]
+//     fn test_cursor_movement() {
+//         let mut editor = BufferView::new(
+//             Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+//             0,
+//             None,
+//         );
+//         editor.buffer.borrow_mut().edit(&[0..0], "abc");
+//         editor.buffer.borrow_mut().edit(&[3..3], "\n");
+//         editor.buffer.borrow_mut().edit(&[4..4], "\ndef");
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+//         editor.move_right();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 1)]);
+
+//         // Wraps across lines moving right
+//         for _ in 0..3 {
+//             editor.move_right();
+//         }
+//         assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+
+//         // Stops at end
+//         for _ in 0..4 {
+//             editor.move_right();
+//         }
+//         assert_eq!(render_selections(&editor), vec![empty_selection(2, 3)]);
+
+//         // Wraps across lines moving left
+//         for _ in 0..4 {
+//             editor.move_left();
+//         }
+//         assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+
+//         // Stops at start
+//         for _ in 0..4 {
+//             editor.move_left();
+//         }
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+//         // Moves down and up at column 0
+//         editor.move_down();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+//         editor.move_up();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+//         // Maintains a goal column when moving down
+//         // This means we'll jump to the column we started with even after crossing a shorter line
+//         editor.move_right();
+//         editor.move_right();
+//         editor.move_down();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+//         editor.move_down();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(2, 2)]);
+
+//         // Jumps to end when moving down on the last line.
+//         editor.move_down();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(2, 3)]);
+
+//         // Stops at end
+//         editor.move_down();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(2, 3)]);
+
+//         // Resets the goal column when moving horizontally
+//         editor.move_left();
+//         editor.move_left();
+//         editor.move_up();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+//         editor.move_up();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 1)]);
+
+//         // Jumps to start when moving up on the first line
+//         editor.move_up();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+//         // Preserves goal column after jumping to start/end
+//         editor.move_down();
+//         editor.move_down();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(2, 1)]);
+//         editor.move_down();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(2, 3)]);
+//         editor.move_up();
+//         editor.move_up();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 1)]);
+//     }
+
+//     #[test]
+//     fn test_selection_movement() {
+//         let mut editor = BufferView::new(
+//             Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+//             0,
+//             None,
+//         );
+//         editor.buffer.borrow_mut().edit(&[0..0], "abc");
+//         editor.buffer.borrow_mut().edit(&[3..3], "\n");
+//         editor.buffer.borrow_mut().edit(&[4..4], "\ndef");
+
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+//         editor.select_right();
+//         assert_eq!(render_selections(&editor), vec![selection((0, 0), (0, 1))]);
+
+//         // Selecting right wraps across newlines
+//         for _ in 0..3 {
+//             editor.select_right();
+//         }
+//         assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 0))]);
+
+//         // Moving right with a non-empty selection clears the selection
+//         editor.move_right();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+//         editor.move_right();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(2, 0)]);
+
+//         // Selecting left wraps across newlines
+//         editor.select_left();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![rev_selection((1, 0), (2, 0))]
+//         );
+//         editor.select_left();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![rev_selection((0, 3), (2, 0))]
+//         );
+
+//         // Moving left with a non-empty selection clears the selection
+//         editor.move_left();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 3)]);
+
+//         // Reverse is updated correctly when selecting left and right
+//         editor.select_left();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![rev_selection((0, 2), (0, 3))]
+//         );
+//         editor.select_right();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 3)]);
+//         editor.select_right();
+//         assert_eq!(render_selections(&editor), vec![selection((0, 3), (1, 0))]);
+//         editor.select_left();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 3)]);
+//         editor.select_left();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![rev_selection((0, 2), (0, 3))]
+//         );
+
+//         // Selecting vertically moves the head and updates the reversed property
+//         editor.select_left();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![rev_selection((0, 1), (0, 3))]
+//         );
+//         editor.select_down();
+//         assert_eq!(render_selections(&editor), vec![selection((0, 3), (1, 0))]);
+//         editor.select_down();
+//         assert_eq!(render_selections(&editor), vec![selection((0, 3), (2, 1))]);
+//         editor.select_up();
+//         editor.select_up();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![rev_selection((0, 1), (0, 3))]
+//         );
+
+//         // Favors selection end when moving down
+//         editor.move_down();
+//         editor.move_down();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(2, 3)]);
+
+//         // Favors selection start when moving up
+//         editor.move_left();
+//         editor.move_left();
+//         editor.select_right();
+//         editor.select_right();
+//         assert_eq!(render_selections(&editor), vec![selection((2, 1), (2, 3))]);
+//         editor.move_up();
+//         editor.move_up();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 1)]);
+
+//         // Select to a direct point in front of cursor position
+//         editor.select_to(Point::new(1, 0));
+//         assert_eq!(render_selections(&editor), vec![selection((0, 1), (1, 0))]);
+//         editor.move_right(); // cancel selection
+//         assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+//         editor.move_right();
+//         editor.move_right();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(2, 1)]);
+
+//         // Selection can even go to a point before the cursor (with reverse)
+//         editor.select_to(Point::new(0, 0));
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![rev_selection((0, 0), (2, 1))]
+//         );
+
+//         // A selection can switch to a new point and the selection will update
+//         editor.select_to(Point::new(0, 3));
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![rev_selection((0, 3), (2, 1))]
+//         );
+
+//         // A selection can even swing around the cursor without having to unselect
+//         editor.select_to(Point::new(2, 3));
+//         assert_eq!(render_selections(&editor), vec![selection((2, 1), (2, 3))]);
+//     }
+
+//     #[test]
+//     fn test_move_to_beginning_or_end_of_word() {
+//         let mut editor = BufferView::new(
+//             Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+//             0,
+//             None,
+//         );
+//         editor.buffer.borrow_mut().edit(&[0..0], "abc def\nghi.jkl");
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+//         editor.move_to_end_of_word();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 3)]);
+//         editor.move_to_end_of_word();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 4)]);
+//         editor.move_to_end_of_word();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 7)]);
+//         editor.move_to_end_of_word();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+//         editor.move_to_end_of_word();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(1, 3)]);
+//         editor.move_to_end_of_word();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(1, 4)]);
+//         editor.move_to_end_of_word();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(1, 7)]);
+//         editor.move_to_end_of_word();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(1, 7)]);
+
+//         editor.move_to_beginning_of_word();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(1, 4)]);
+//         editor.move_to_beginning_of_word();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(1, 3)]);
+//         editor.move_to_beginning_of_word();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+//         editor.move_to_beginning_of_word();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 7)]);
+//         editor.move_to_beginning_of_word();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 4)]);
+//         editor.move_to_beginning_of_word();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 3)]);
+//         editor.move_to_beginning_of_word();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+//         editor.move_to_beginning_of_word();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+//     }
+
+//     #[test]
+//     fn test_select_to_beginning_or_end_of_word() {
+//         let mut editor = BufferView::new(
+//             Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+//             0,
+//             None,
+//         );
+//         editor.buffer.borrow_mut().edit(&[0..0], "abc def\nghi.jkl");
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+//         editor.select_to_end_of_word();
+//         assert_eq!(render_selections(&editor), vec![selection((0, 0), (0, 3))]);
+//         editor.select_to_end_of_word();
+//         assert_eq!(render_selections(&editor), vec![selection((0, 0), (0, 4))]);
+//         editor.select_to_end_of_word();
+//         assert_eq!(render_selections(&editor), vec![selection((0, 0), (0, 7))]);
+//         editor.select_to_end_of_word();
+//         assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 0))]);
+//         editor.select_to_end_of_word();
+//         assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 3))]);
+//         editor.select_to_end_of_word();
+//         assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 4))]);
+//         editor.select_to_end_of_word();
+//         assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 7))]);
+//         editor.select_to_end_of_word();
+//         assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 7))]);
+
+//         editor.move_right();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(1, 7)]);
+
+//         editor.select_to_beginning_of_word();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![rev_selection((1, 4), (1, 7))]
+//         );
+//         editor.select_to_beginning_of_word();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![rev_selection((1, 3), (1, 7))]
+//         );
+//         editor.select_to_beginning_of_word();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![rev_selection((1, 0), (1, 7))]
+//         );
+//         editor.select_to_beginning_of_word();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![rev_selection((0, 7), (1, 7))]
+//         );
+//         editor.select_to_beginning_of_word();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![rev_selection((0, 4), (1, 7))]
+//         );
+//         editor.select_to_beginning_of_word();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![rev_selection((0, 3), (1, 7))]
+//         );
+//         editor.select_to_beginning_of_word();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![rev_selection((0, 0), (1, 7))]
+//         );
+//         editor.select_to_beginning_of_word();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![rev_selection((0, 0), (1, 7))]
+//         );
+//     }
+
+//     #[test]
+//     fn test_move_to_beginning_or_end_of_line() {
+//         let mut editor = BufferView::new(
+//             Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+//             0,
+//             None,
+//         );
+//         editor
+//             .buffer
+//             .borrow_mut()
+//             .edit(&[0..0], "abcdef\nghijklmno");
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+//         editor.move_to_end_of_line();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 6)]);
+//         editor.move_to_end_of_line();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 6)]);
+//         editor.move_right();
+//         editor.move_to_end_of_line();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(1, 9)]);
+
+//         editor.move_to_beginning_of_line();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+//         editor.move_to_beginning_of_line();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(1, 0)]);
+//         editor.move_left();
+//         editor.move_to_beginning_of_line();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+//     }
+
+//     #[test]
+//     fn test_select_to_beginning_or_end_of_line() {
+//         let mut editor = BufferView::new(
+//             Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+//             0,
+//             None,
+//         );
+//         editor
+//             .buffer
+//             .borrow_mut()
+//             .edit(&[0..0], "abcdef\nghijklmno");
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+//         editor.select_to_end_of_line();
+//         assert_eq!(render_selections(&editor), vec![selection((0, 0), (0, 6))]);
+//         editor.select_to_end_of_line();
+//         assert_eq!(render_selections(&editor), vec![selection((0, 0), (0, 6))]);
+//         editor.move_right();
+//         editor.move_right();
+//         editor.select_to_end_of_line();
+//         assert_eq!(render_selections(&editor), vec![selection((1, 0), (1, 9))]);
+
+//         editor.move_right();
+//         editor.select_to_beginning_of_line();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![rev_selection((1, 0), (1, 9))]
+//         );
+//         editor.select_to_beginning_of_line();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![rev_selection((1, 0), (1, 9))]
+//         );
+//         editor.move_left();
+//         editor.move_left();
+//         editor.select_to_beginning_of_line();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![rev_selection((0, 0), (0, 6))]
+//         );
+//     }
+
+//     #[test]
+//     fn test_select_word() {
+//         let mut editor = BufferView::new(
+//             Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+//             0,
+//             None,
+//         );
+//         editor.buffer.borrow_mut().edit(&[0..0], "abc.def---ghi");
+
+//         editor.set_cursor_position(Point::new(0, 5), false);
+//         editor.select_word();
+//         assert_eq!(render_selections(&editor), vec![selection((0, 4), (0, 7))]);
+
+//         editor.set_cursor_position(Point::new(0, 8), false);
+//         editor.select_word();
+//         assert_eq!(render_selections(&editor), vec![selection((0, 7), (0, 10))]);
+//     }
+
+//     #[test]
+//     fn test_select_line() {
+//         let mut editor = BufferView::new(
+//             Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+//             0,
+//             None,
+//         );
+//         editor.buffer.borrow_mut().edit(&[0..0], "abc\ndef\nghi");
+
+//         editor.set_cursor_position(Point::new(0, 2), false);
+//         editor.select_line();
+//         assert_eq!(render_selections(&editor), vec![selection((0, 0), (1, 0))]);
+
+//         editor.set_cursor_position(Point::new(2, 1), false);
+//         editor.select_line();
+//         assert_eq!(render_selections(&editor), vec![selection((2, 0), (2, 3))]);
+//     }
+
+//     #[test]
+//     fn test_move_to_top_or_bottom() {
+//         let mut editor = BufferView::new(
+//             Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+//             0,
+//             None,
+//         );
+//         editor.buffer.borrow_mut().edit(&[0..0], "abc\ndef\nghi");
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+//         editor.move_to_bottom();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(2, 3)]);
+//         editor.move_to_top();
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+//     }
+
+//     #[test]
+//     fn test_select_to_top_or_bottom() {
+//         let mut editor = BufferView::new(
+//             Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+//             0,
+//             None,
+//         );
+//         editor.buffer.borrow_mut().edit(&[0..0], "abc\ndef\nghi");
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+//         editor.select_to_bottom();
+//         assert_eq!(render_selections(&editor), vec![selection((0, 0), (2, 3))]);
+
+//         editor.move_right();
+//         editor.select_to_top();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![rev_selection((0, 0), (2, 3))]
+//         );
+//     }
+
+//     #[test]
+//     fn test_backspace() {
+//         let mut editor = BufferView::new(
+//             Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+//             0,
+//             None,
+//         );
+//         editor.buffer.borrow_mut().edit(&[0..0], "abcdefghi");
+//         editor.add_selection(Point::new(0, 3), Point::new(0, 4));
+//         editor.add_selection(Point::new(0, 9), Point::new(0, 9));
+//         editor.backspace();
+//         assert_eq!(editor.buffer.borrow().to_string(), "abcefghi");
+//         editor.backspace();
+//         assert_eq!(editor.buffer.borrow().to_string(), "abefgh");
+//     }
+
+//     #[test]
+//     fn test_delete() {
+//         let mut editor = BufferView::new(
+//             Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+//             0,
+//             None,
+//         );
+//         editor.buffer.borrow_mut().edit(&[0..0], "abcdefghi");
+//         editor.add_selection(Point::new(0, 3), Point::new(0, 4));
+//         editor.add_selection(Point::new(0, 9), Point::new(0, 9));
+//         editor.delete();
+//         assert_eq!(editor.buffer.borrow().to_string(), "abcefghi");
+//         editor.delete();
+//         assert_eq!(editor.buffer.borrow().to_string(), "bcfghi");
+//     }
+
+//     #[test]
+//     fn test_add_selection() {
+//         let mut editor = BufferView::new(
+//             Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+//             0,
+//             None,
+//         );
+//         editor
+//             .buffer
+//             .borrow_mut()
+//             .edit(&[0..0], "abcd\nefgh\nijkl\nmnop");
+//         assert_eq!(render_selections(&editor), vec![empty_selection(0, 0)]);
+
+//         // Adding non-overlapping selections
+//         editor.move_right();
+//         editor.move_right();
+//         editor.add_selection(Point::new(0, 0), Point::new(0, 1));
+//         editor.add_selection(Point::new(2, 2), Point::new(2, 3));
+//         editor.add_selection(Point::new(0, 3), Point::new(1, 2));
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![
+//                 selection((0, 0), (0, 1)),
+//                 selection((0, 2), (0, 2)),
+//                 selection((0, 3), (1, 2)),
+//                 selection((2, 2), (2, 3)),
+//             ]
+//         );
+
+//         // Adding a selection that starts at the start of an existing selection
+//         editor.add_selection(Point::new(0, 3), Point::new(1, 0));
+//         editor.add_selection(Point::new(0, 3), Point::new(1, 3));
+//         editor.add_selection(Point::new(0, 3), Point::new(1, 2));
+
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![
+//                 selection((0, 0), (0, 1)),
+//                 selection((0, 2), (0, 2)),
+//                 selection((0, 3), (1, 3)),
+//                 selection((2, 2), (2, 3)),
+//             ]
+//         );
+
+//         // Adding a selection that starts or ends inside an existing selection
+//         editor.add_selection(Point::new(0, 1), Point::new(0, 2));
+//         editor.add_selection(Point::new(1, 2), Point::new(1, 4));
+//         editor.add_selection(Point::new(2, 1), Point::new(2, 2));
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![
+//                 selection((0, 0), (0, 2)),
+//                 selection((0, 3), (1, 4)),
+//                 selection((2, 1), (2, 3)),
+//             ]
+//         );
+//     }
+
+//     #[test]
+//     fn test_add_selection_above() {
+//         let mut editor = BufferView::new(
+//             Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+//             0,
+//             None,
+//         );
+//         editor.buffer.borrow_mut().edit(
+//             &[0..0],
+//             "\
+//              abcdefghijk\n\
+//              lmnop\n\
+//              \n\
+//              \n\
+//              qrstuvwxyz\n\
+//              ",
+//         );
+
+//         // Multi-line selections
+//         editor.move_down();
+//         editor.move_right();
+//         editor.move_right();
+//         editor.select_down();
+//         editor.select_down();
+//         editor.select_down();
+//         editor.select_right();
+//         editor.select_right();
+//         editor.add_selection_above();
+//         assert_eq!(render_selections(&editor), vec![selection((1, 2), (4, 4))]);
+
+//         // Single-line selections
+//         editor.move_up();
+//         editor.move_left();
+//         editor.move_left();
+//         editor.add_selection(Point::new(2, 0), Point::new(2, 0));
+//         editor.add_selection(Point::new(4, 1), Point::new(4, 3));
+//         editor.add_selection(Point::new(4, 6), Point::new(4, 6));
+//         editor.add_selection(Point::new(4, 7), Point::new(4, 9));
+//         editor.add_selection_above();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![
+//                 selection((0, 0), (0, 0)),
+//                 selection((0, 7), (0, 9)),
+//                 selection((1, 0), (1, 0)),
+//                 selection((1, 1), (1, 3)),
+//                 selection((1, 5), (1, 5)),
+//                 selection((2, 0), (2, 0)),
+//                 selection((4, 1), (4, 3)),
+//                 selection((4, 6), (4, 6)),
+//                 selection((4, 7), (4, 9)),
+//             ]
+//         );
+
+//         editor.add_selection_above();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![
+//                 selection((0, 0), (0, 0)),
+//                 selection((0, 1), (0, 3)),
+//                 selection((0, 6), (0, 6)),
+//                 selection((0, 7), (0, 9)),
+//                 selection((1, 0), (1, 0)),
+//                 selection((1, 1), (1, 3)),
+//                 selection((1, 5), (1, 5)),
+//                 selection((2, 0), (2, 0)),
+//                 selection((4, 1), (4, 3)),
+//                 selection((4, 6), (4, 6)),
+//                 selection((4, 7), (4, 9)),
+//             ]
+//         );
+//     }
+
+//     #[test]
+//     fn test_add_selection_below() {
+//         let mut editor = BufferView::new(
+//             Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+//             0,
+//             None,
+//         );
+//         editor.buffer.borrow_mut().edit(
+//             &[0..0],
+//             "\
+//              abcdefgh\n\
+//              ijklm\n\
+//              \n\
+//              \n\
+//              nopqrstuvwx\n\
+//              yz\
+//              ",
+//         );
+
+//         // Multi-line selections
+//         editor.select_down();
+//         editor.select_down();
+//         editor.select_down();
+//         editor.select_down();
+//         editor.select_right();
+//         editor.add_selection_below();
+//         assert_eq!(render_selections(&editor), vec![selection((0, 0), (4, 1))]);
+
+//         // Single-line selections
+//         editor.move_left();
+//         editor.add_selection(Point::new(0, 1), Point::new(0, 1));
+//         editor.add_selection(Point::new(0, 4), Point::new(0, 8));
+//         editor.add_selection(Point::new(4, 5), Point::new(4, 6));
+//         editor.add_selection_below();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![
+//                 selection((0, 0), (0, 0)),
+//                 selection((0, 1), (0, 1)),
+//                 selection((0, 4), (0, 8)),
+//                 selection((1, 0), (1, 0)),
+//                 selection((1, 1), (1, 1)),
+//                 selection((1, 4), (1, 5)),
+//                 selection((4, 5), (4, 6)),
+//             ]
+//         );
+
+//         editor.add_selection_below();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![
+//                 selection((0, 0), (0, 0)),
+//                 selection((0, 1), (0, 1)),
+//                 selection((0, 4), (0, 8)),
+//                 selection((1, 0), (1, 0)),
+//                 selection((1, 1), (1, 1)),
+//                 selection((1, 4), (1, 5)),
+//                 selection((2, 0), (2, 0)),
+//                 selection((4, 1), (4, 1)),
+//                 selection((4, 4), (4, 8)),
+//             ]
+//         );
+//     }
+
+//     #[test]
+//     fn test_set_cursor_position() {
+//         let mut editor = BufferView::new(
+//             Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+//             0,
+//             None,
+//         );
+//         editor.buffer.borrow_mut().edit(&[0..0], "abc\ndef\nghi");
+//         editor.add_selection_below();
+//         editor.add_selection_below();
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![
+//                 empty_selection(0, 0),
+//                 empty_selection(1, 0),
+//                 empty_selection(2, 0),
+//             ]
+//         );
+
+//         editor.set_cursor_position(Point::new(1, 2), false);
+//         assert_eq!(render_selections(&editor), vec![empty_selection(1, 2)]);
+//     }
+
+//     #[test]
+//     fn test_edit() {
+//         let mut editor = BufferView::new(
+//             Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+//             0,
+//             None,
+//         );
+
+//         editor
+//             .buffer
+//             .borrow_mut()
+//             .edit(&[0..0], "abcdefgh\nhijklmno");
+
+//         // Three selections on the same line
+//         editor.select_right();
+//         editor.select_right();
+//         editor.add_selection(Point::new(0, 3), Point::new(0, 5));
+//         editor.add_selection(Point::new(0, 7), Point::new(1, 1));
+//         editor.edit("-");
+//         assert_eq!(editor.buffer.borrow().to_string(), "-c-fg-ijklmno");
+//         assert_eq!(
+//             render_selections(&editor),
+//             vec![
+//                 selection((0, 1), (0, 1)),
+//                 selection((0, 3), (0, 3)),
+//                 selection((0, 6), (0, 6)),
+//             ]
+//         );
+
+//         let mut editor = BufferView::new(
+//             Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+//             0,
+//             None,
+//         );
+//         editor.buffer.borrow_mut().edit(&[0..0], "123");
+
+//         editor.edit("ä");
+//         editor.edit("a");
+
+//         assert_eq!(editor.buffer.borrow().to_string(), "äa123");
+//         assert_eq!(render_selections(&editor), vec![selection((0, 2), (0, 2)),]);
+//     }
+
+//     #[test]
+//     fn test_autoscroll() {
+//         let mut buffer = Buffer::new(build_base_buffer_id());
+//         buffer.edit(&[0..0], "abc\ndef\nghi\njkl\nmno\npqr\nstu\nvwx\nyz");
+//         let start = buffer.anchor_before_offset(0).unwrap();
+//         let end = buffer.anchor_before_offset(buffer.len()).unwrap();
+//         let max_point = buffer.max_point();
+//         let mut editor = BufferView::new(buffer.into_shared(), 0, None);
+//         let line_height = 5.0;
+//         let height = 3.0 * line_height;
+//         editor
+//             .set_height(height)
+//             .set_line_height(line_height)
+//             .set_scroll_top(2.5 * line_height);
+//         assert_eq!(editor.scroll_top(), 2.5 * line_height);
+
+//         editor
+//             .autoscroll_to_range(start.clone()..start.clone(), true)
+//             .unwrap();
+//         assert_eq!(editor.scroll_top(), 0.0);
+//         editor
+//             .autoscroll_to_range(end.clone()..end.clone(), true)
+//             .unwrap();
+//         assert_eq!(
+//             editor.scroll_top(),
+//             (max_point.row as f64 * line_height) - (height / 2.0)
+//         );
+//     }
+
+//     #[test]
+//     fn test_render() {
+//         let buffer = Rc::new(RefCell::new(Buffer::new(build_base_buffer_id())));
+//         buffer
+//             .borrow_mut()
+//             .edit(&[0..0], "abc\ndef\nghi\njkl\nmno\npqr\nstu\nvwx\nyz");
+//         let line_height = 6.0;
+
+//         {
+//             let mut editor = BufferView::new(buffer.clone(), 0, None);
+//             // Selections starting or ending outside viewport
+//             editor.add_selection(Point::new(1, 2), Point::new(3, 1));
+//             editor.add_selection(Point::new(5, 2), Point::new(6, 0));
+//             // Selection fully inside viewport
+//             editor.add_selection(Point::new(3, 2), Point::new(4, 1));
+//             // Selection fully outside viewport
+//             editor.add_selection(Point::new(6, 3), Point::new(7, 2));
+//             editor
+//                 .set_height(3.0 * line_height)
+//                 .set_line_height(line_height)
+//                 .set_scroll_top(2.5 * line_height);
+
+//             let frame = editor.render();
+//             assert_eq!(frame["first_visible_row"], 2);
+//             assert_eq!(
+//                 stringify_lines(&frame["lines"]),
+//                 vec!["ghi", "jkl", "mno", "pqr"]
+//             );
+//             assert_eq!(
+//                 frame["selections"],
+//                 json!([
+//                     selection((1, 2), (3, 1)),
+//                     selection((3, 2), (4, 1)),
+//                     selection((5, 2), (6, 0)),
+//                 ])
+//             );
+//         }
+
+//         // Selection starting at the end of buffer
+//         {
+//             let mut editor = BufferView::new(buffer.clone(), 0, None);
+//             editor.add_selection(Point::new(8, 2), Point::new(8, 2));
+//             editor
+//                 .set_height(8.0 * line_height)
+//                 .set_line_height(line_height)
+//                 .set_scroll_top(1.0 * line_height);
+
+//             let frame = editor.render();
+//             assert_eq!(frame["first_visible_row"], 1);
+//             assert_eq!(
+//                 stringify_lines(&frame["lines"]),
+//                 vec!["def", "ghi", "jkl", "mno", "pqr", "stu", "vwx", "yz"]
+//             );
+//             assert_eq!(frame["selections"], json!([selection((8, 2), (8, 2))]));
+//         }
+
+//         // Selection ending exactly at first visible row
+//         {
+//             let mut editor = BufferView::new(buffer.clone(), 0, None);
+//             editor.add_selection(Point::new(0, 2), Point::new(1, 0));
+//             editor
+//                 .set_height(3.0 * line_height)
+//                 .set_line_height(line_height)
+//                 .set_scroll_top(1.0 * line_height);
+
+//             let frame = editor.render();
+//             assert_eq!(frame["first_visible_row"], 1);
+//             assert_eq!(stringify_lines(&frame["lines"]), vec!["def", "ghi", "jkl"]);
+//             assert_eq!(frame["selections"], json!([]));
+//         }
+//     }
+
+//     #[test]
+//     fn test_longest_line_in_frame() {
+//         let buffer = Rc::new(RefCell::new(Buffer::new(build_base_buffer_id())));
+//         buffer.borrow_mut().edit(&[0..0], "1\n1\n1\n1\n11\n1\n1");
+//         let line_height = 6.0;
+
+//         let mut editor = BufferView::new(buffer.clone(), 0, None);
+//         editor
+//             .set_height(2.0 * line_height)
+//             .set_line_height(line_height)
+//             .set_scroll_top(2.0 * line_height);
+
+//         let _ = editor.render();
+//     }
+
+//     #[test]
+//     fn test_render_past_last_line() {
+//         let line_height = 4.0;
+//         let mut editor = BufferView::new(
+//             Rc::new(RefCell::new(Buffer::new(build_base_buffer_id()))),
+//             0,
+//             None,
+//         );
+//         editor.buffer.borrow_mut().edit(&[0..0], "abc\ndef\nghi");
+//         editor.add_selection(Point::new(2, 3), Point::new(2, 3));
+//         editor
+//             .set_height(3.0 * line_height)
+//             .set_line_height(line_height)
+//             .set_scroll_top(2.0 * line_height);
+
+//         let frame = editor.render();
+//         assert_eq!(frame["first_visible_row"], 2);
+//         assert_eq!(stringify_lines(&frame["lines"]), vec!["ghi"]);
+//         assert_eq!(frame["selections"], json!([selection((2, 3), (2, 3))]));
+
+//         editor.set_scroll_top(3.0 * line_height);
+//         let frame = editor.render();
+//         assert_eq!(frame["first_visible_row"], 2);
+//         assert_eq!(stringify_lines(&frame["lines"]), vec!["ghi"]);
+//         assert_eq!(frame["selections"], json!([selection((2, 3), (2, 3))]));
+//     }
+
+//     #[test]
+//     fn test_dropping_view_removes_selection_set() {
+//         let buffer = Buffer::new(build_base_buffer_id()).into_shared();
+//         let editor = BufferView::new(buffer.clone(), 0, None);
+//         let selection_set_id = editor.selection_set_id;
+//         assert!(buffer.borrow_mut().selections(selection_set_id).is_ok());
+
+//         drop(editor);
+//         assert!(buffer.borrow_mut().selections(selection_set_id).is_err());
+//     }
+
+//     fn stringify_lines(lines: &serde_json::Value) -> Vec<String> {
+//         lines
+//             .as_array()
+//             .unwrap()
+//             .iter()
+//             .map(|line| line.as_str().unwrap().into())
+//             .collect()
+//     }
+
+//     fn render_selections(editor: &BufferView) -> Vec<SelectionProps> {
+//         let buffer = editor.buffer.borrow();
+//         editor
+//             .selections()
+//             .iter()
+//             .map(|s| SelectionProps {
+//                 user_id: 0,
+//                 start: buffer.point_for_anchor(&s.start).unwrap(),
+//                 end: buffer.point_for_anchor(&s.end).unwrap(),
+//                 reversed: s.reversed,
+//                 remote: false,
+//             })
+//             .collect()
+//     }
+
+//     fn empty_selection(row: u32, column: u32) -> SelectionProps {
+//         SelectionProps {
+//             user_id: 0,
+//             start: Point::new(row, column),
+//             end: Point::new(row, column),
+//             reversed: false,
+//             remote: false,
+//         }
+//     }
+
+//     fn selection(start: (u32, u32), end: (u32, u32)) -> SelectionProps {
+//         SelectionProps {
+//             user_id: 0,
+//             start: Point::new(start.0, start.1),
+//             end: Point::new(end.0, end.1),
+//             reversed: false,
+//             remote: false,
+//         }
+//     }
+
+//     fn rev_selection(start: (u32, u32), end: (u32, u32)) -> SelectionProps {
+//         SelectionProps {
+//             user_id: 0,
+//             start: Point::new(start.0, start.1),
+//             end: Point::new(end.0, end.1),
+//             reversed: true,
+//             remote: false,
+//         }
+//     }
+// }

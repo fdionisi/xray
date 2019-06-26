@@ -226,8 +226,9 @@ impl Connection {
                     updates,
                     removals,
                     responses,
-                })).unwrap()
-                    .into();
+                }))
+                .unwrap()
+                .into();
             Ok(Async::Ready(Some(message)))
         } else {
             self.0.borrow_mut().pending_task = Some(task::current());
@@ -251,7 +252,8 @@ impl Stream for Connection {
             Err(error) => {
                 let message = serialize::<Result<MessageToClient, Error>>(&Err(Error::IoError(
                     format!("{}", error),
-                ))).unwrap();
+                )))
+                .unwrap();
                 return Ok(Async::Ready(Some(message.into())));
             }
         }

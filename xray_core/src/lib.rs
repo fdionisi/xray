@@ -5,6 +5,7 @@ extern crate bytes;
 #[macro_use]
 extern crate lazy_static;
 extern crate futures;
+extern crate memo_core;
 extern crate parking_lot;
 extern crate seahash;
 extern crate serde;
@@ -17,6 +18,7 @@ extern crate smallvec;
 extern crate tokio_core;
 #[cfg(test)]
 extern crate tokio_timer;
+extern crate uuid;
 #[cfg(target_arch = "wasm32")]
 extern crate wasm_bindgen;
 
@@ -29,9 +31,12 @@ pub mod buffer;
 pub mod buffer_view;
 pub mod cross_platform;
 pub mod fs;
+pub mod git;
 pub mod notify_cell;
 pub mod rpc;
+pub mod storage;
 pub mod window;
+pub mod work_tree;
 pub mod workspace;
 
 mod file_finder;
@@ -41,7 +46,6 @@ mod never;
 mod project;
 #[cfg(test)]
 mod stream_ext;
-mod tree;
 
 pub use app::{App, WindowId};
 use futures::future::{Executor, Future};
@@ -49,6 +53,8 @@ pub use never::Never;
 use std::cell::RefCell;
 use std::rc::Rc;
 pub use window::{ViewId, WindowUpdate};
+
+pub use memo_core::ReplicaId;
 
 pub type ForegroundExecutor = Rc<Executor<Box<Future<Item = (), Error = ()> + 'static>>>;
 pub type BackgroundExecutor = Rc<Executor<Box<Future<Item = (), Error = ()> + Send + 'static>>>;

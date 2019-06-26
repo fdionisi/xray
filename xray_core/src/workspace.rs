@@ -1,4 +1,4 @@
-use buffer::{self, Buffer, BufferId};
+use buffer::Buffer;
 use buffer_view::{BufferView, BufferViewDelegate};
 use cross_platform;
 use file_finder::{FileFinderView, FileFinderViewDelegate};
@@ -13,7 +13,6 @@ use project::{
 use rpc::{self, client, server};
 use serde_json;
 use std::cell::{Ref, RefCell, RefMut};
-use std::ops::Range;
 use std::rc::Rc;
 use window::{View, ViewHandle, WeakViewHandle, WeakWindowHandle, Window};
 use ForegroundExecutor;
@@ -57,12 +56,6 @@ pub struct WorkspaceView {
     updates: NotifyCell<()>,
     self_handle: Option<WeakViewHandle<WorkspaceView>>,
     window_handle: Option<WeakWindowHandle>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Anchor {
-    buffer_id: BufferId,
-    range: Range<buffer::Anchor>,
 }
 
 #[derive(Deserialize)]
@@ -181,7 +174,6 @@ impl WorkspaceView {
         T: 'static + Future<Item = Rc<RefCell<Buffer>>, Error = project::Error>,
     {
         if let Some(window_handle) = self.window_handle.clone() {
-            let user_id = self.workspace.borrow().user_id();
             let view_handle = self.self_handle.clone();
             self.foreground
                 .execute(Box::new(buffer.then(move |result| {
@@ -189,7 +181,7 @@ impl WorkspaceView {
                         Ok(buffer) => {
                             if let Some(view_handle) = view_handle {
                                 let mut buffer_view =
-                                    BufferView::new(buffer, user_id, Some(view_handle.clone()));
+                                    BufferView::new(buffer, Some(view_handle.clone()));
                                 buffer_view.set_line_height(20.0);
                                 let buffer_view = window.add_view(buffer_view);
                                 buffer_view.focus().unwrap();

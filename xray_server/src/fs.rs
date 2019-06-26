@@ -1,27 +1,36 @@
-use futures::{self, Future, Stream};
-use ignore::WalkBuilder;
-use parking_lot::Mutex;
+use std::cell::RefCell;
 use std::char::decode_utf16;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::thread;
-use xray_core::buffer::BufferSnapshot;
+
+use futures::{self, Future, Stream};
+use parking_lot::Mutex;
 use xray_core::cross_platform;
 use xray_core::fs as xray_fs;
+use xray_core::git as xray_git;
+use xray_core::work_tree;
 use xray_core::notify_cell::NotifyCell;
+use xray_core::storage::Storage;
+use xray_core::ReplicaId;
+
+use database;
+use git;
 
 pub struct Tree {
     path: cross_platform::Path,
     root: xray_fs::Entry,
+    database: Rc<database::Database>,
+    work_tree: Rc<RefCell<work_tree::WorkTree>>,
+    git_provider: Rc<xray_git::GitProvider>,
     updates: NotifyCell<()>,
     populated: NotifyCell<bool>,
 }
-
-pub struct FileProvider;
 
 pub struct File {
     id: xray_fs::FileId,
@@ -29,69 +38,88 @@ pub struct File {
 }
 
 impl Tree {
-    pub fn new<T: Into<PathBuf>>(path: T) -> Result<Self, &'static str> {
+    pub fn new<T: Into<PathBuf>>(
+        foreground: xray_core::ForegroundExecutor,
+        path: T,
+        replica_id: ReplicaId,
+        git: Rc<git::GitProvider>,
+        database: Rc<database::Database>,
+    ) -> Result<Self, &'static str> {
         let path = path.into();
         let file_name = OsString::from(path.file_name().ok_or("Path must have a filename")?);
         let root = xray_fs::Entry::dir(file_name.into(), false, false);
         let updates = NotifyCell::new(());
         let populated = NotifyCell::new(false);
+
+        let work_tree =
+            work_tree::WorkTree::new(foreground.clone(), database.clone(), replica_id, Some(git.head()), git.clone());
+
         Self::populate(
-            path.clone(),
+            &work_tree,
             root.clone(),
             updates.clone(),
             populated.clone(),
         );
+
+        let work_tree = Rc::new(RefCell::new(work_tree));
+        
+        {
+            database.add_tree(work_tree.clone());
+        }
+
         Ok(Self {
             path: cross_platform::Path::from(path.into_os_string()),
             root,
             updates,
             populated,
+            work_tree,
+            database,
+            git_provider: git,
         })
     }
 
     fn populate(
-        path: PathBuf,
+        work_tree: &work_tree::WorkTree,
         root: xray_fs::Entry,
         updates: NotifyCell<()>,
         populated: NotifyCell<bool>,
     ) {
-        thread::spawn(move || {
-            let mut stack = vec![root];
+        let mut stack = vec![root];
+        let work_tree = work_tree.inner();
+        work_tree.borrow().with_cursor(|cursor| loop {
+            let entry = cursor.entry().unwrap();
 
-            let entries = WalkBuilder::new(path.clone())
-                .follow_links(true)
-                .include_ignored(true)
-                .build()
-                .skip(1)
-                .filter_map(|e| e.ok());
-
-            for entry in entries {
-                stack.truncate(entry.depth());
-
-                let file_type = entry.file_type().unwrap();
-                let file_name = entry.file_name();
-
-                if file_type.is_dir() {
-                    let dir = xray_fs::Entry::dir(
-                        file_name.into(),
-                        file_type.is_symlink(),
-                        entry.ignored(),
-                    );
-                    stack.last_mut().unwrap().insert(dir.clone()).unwrap();
-                    stack.push(dir);
-                } else if file_type.is_file() {
-                    let file = xray_fs::Entry::file(
-                        file_name.into(),
-                        file_type.is_symlink(),
-                        entry.ignored(),
-                    );
-                    stack.last_mut().unwrap().insert(file).unwrap();
+            if entry.status != memo_core::FileStatus::Removed {
+                stack.truncate(entry.depth);
+                match entry.file_type {
+                    memo_core::FileType::Directory => {
+                        let dir = xray_fs::Entry::dir(
+                            entry.name.as_os_str().into(),
+                            false,
+                            !entry.visible,
+                        );
+                        stack.last_mut().unwrap().insert(dir.clone()).unwrap();
+                        stack.push(dir);
+                    }
+                    memo_core::FileType::Text => {
+                        let file = xray_fs::Entry::file(
+                            entry.name.as_os_str().into(),
+                            false,
+                            !entry.visible,
+                        );
+                        stack.last_mut().unwrap().insert(file).unwrap();
+                    }
                 }
-                updates.set(());
+
+                updates.set(())
             }
 
-            populated.set(true);
+            if !cursor.next(true) {
+                break;
+            }
         });
+
+        populated.set(true);
     }
 }
 
@@ -102,6 +130,22 @@ impl xray_fs::Tree for Tree {
 
     fn updates(&self) -> Box<Stream<Item = (), Error = ()>> {
         Box::new(self.updates.observe())
+    }
+
+    fn work_tree(&self) -> Rc<RefCell<work_tree::WorkTree>> {
+        self.work_tree.clone()
+    }
+
+    fn open_buffer(
+        &self,
+        path: PathBuf,
+    ) -> Box<Future<Item = memo_core::BufferId, Error = io::Error>> {
+        Box::new(
+            self.work_tree
+                .borrow()
+                .open_text_file(path)
+                .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{}", err))),
+        )
     }
 }
 
@@ -123,28 +167,26 @@ impl xray_fs::LocalTree for Tree {
     fn as_tree(&self) -> &xray_fs::Tree {
         self
     }
-}
 
-impl FileProvider {
-    pub fn new() -> Self {
-        FileProvider
+    fn git_provider(&self) -> Rc<xray_git::GitProvider> {
+        self.git_provider.clone()
     }
-}
 
-impl xray_fs::FileProvider for FileProvider {
-    fn open(
+    fn open_file(
         &self,
-        path: &cross_platform::Path,
+        relative_path: &cross_platform::Path,
     ) -> Box<Future<Item = Box<xray_fs::File>, Error = io::Error>> {
+        let mut path = self.path.clone();
+        path.push_path(relative_path);
         let path = path.to_path_buf();
+
         let (tx, rx) = futures::sync::oneshot::channel();
 
         thread::spawn(|| {
             fn open(path: PathBuf) -> Result<File, io::Error> {
-                Ok(File::new(fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(path)?)?)
+                Ok(File::new(
+                    fs::OpenOptions::new().read(true).write(true).open(path)?,
+                )?)
             }
 
             let _ = tx.send(open(path));
@@ -188,22 +230,16 @@ impl xray_fs::File for File {
         Box::new(rx.then(|result| result.expect("Sender should not be dropped")))
     }
 
-    fn write_snapshot(
-        &self,
-        snapshot: BufferSnapshot,
-    ) -> Box<Future<Item = (), Error = io::Error>> {
+    fn write_u16_chars(&self, text: Vec<u16>) -> Box<Future<Item = (), Error = io::Error>> {
         let (tx, rx) = futures::sync::oneshot::channel();
         let file = self.file.clone();
         thread::spawn(move || {
-            fn write(file: &mut fs::File, snapshot: BufferSnapshot) -> Result<(), io::Error> {
+            fn write(file: &mut fs::File, text: Vec<u16>) -> Result<(), io::Error> {
                 let mut size = 0_u64;
                 {
                     let mut buf_writer = io::BufWriter::new(&mut *file);
                     buf_writer.seek(SeekFrom::Start(0))?;
-                    for character in snapshot
-                        .iter()
-                        .flat_map(|c| decode_utf16(c.iter().cloned()))
-                    {
+                    for character in decode_utf16(text) {
                         let character = character.map_err(|_| {
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
@@ -220,7 +256,7 @@ impl xray_fs::File for File {
                 Ok(())
             }
 
-            let _ = tx.send(write(&mut file.lock(), snapshot));
+            let _ = tx.send(write(&mut file.lock(), text));
         });
         Box::new(rx.then(|result| result.expect("Sender should not be dropped")))
     }
