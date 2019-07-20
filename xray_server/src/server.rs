@@ -1,5 +1,6 @@
 use bytes::Bytes;
-use fs;
+use git;
+use network;
 use futures::{future, stream, Future, IntoFuture, Sink, Stream};
 use futures_cpupool::CpuPool;
 use messages::{IncomingMessage, OutgoingMessage};
@@ -12,23 +13,36 @@ use std::rc::Rc;
 use tokio_core::net::{TcpListener, TcpStream};
 use tokio_core::reactor;
 use tokio_io::codec;
-use xray_core::app::Command;
-use xray_core::{self, App, Never, WindowId};
+use xray_core::ReplicaId;
+use xray_core::app::{App, Command, WindowId};
+use xray_core::work_tree::WorkTree;
+use xray_core::never::Never;
+use xray_core::weak_set::WeakSet;
 
 #[derive(Clone)]
 pub struct Server {
-    app: Rc<RefCell<xray_core::App>>,
+    replica_id: ReplicaId,
+    app: Rc<RefCell<App>>,
     reactor: reactor::Handle,
+    gits: Rc<RefCell<WeakSet<git::GitProvider>>>,
+    networks: Rc<RefCell<WeakSet<network::NetworkProvider>>>,
 }
 
 impl Server {
     pub fn new(headless: bool, reactor: reactor::Handle) -> Self {
         let foreground = Rc::new(reactor.clone());
         let background = Rc::new(CpuPool::new_num_cpus());
-        let file_provider = fs::FileProvider::new();
         Server {
-            app: App::new(headless, foreground, background, file_provider),
+            // Get it locally
+            replica_id: uuid::Uuid::new_v4(),
+            app: App::new(
+                headless,
+                foreground,
+                background,
+            ),
             reactor,
+            gits: Rc::new(RefCell::new(WeakSet::new())),
+            networks: Rc::new(RefCell::new(WeakSet::new())),
         }
     }
 
@@ -206,9 +220,22 @@ impl Server {
 
         let roots = paths
             .iter()
-            .map(|path| fs::Tree::new(path).unwrap())
+            .map(|path| {
+                let git = self.git(path);
+                let network = self.network(path);
+
+                WorkTree::new_sync(
+                    Rc::new(self.reactor.clone()),
+                    self.replica_id,
+                    Some(git.head()),
+                    git,
+                    network,
+                ).unwrap()
+            })
             .collect();
-        self.app.borrow_mut().open_local_workspace(roots);
+
+        self.app.borrow_mut().open_local_workspace(self.replica_id, roots);
+
         Ok(())
     }
 
@@ -295,6 +322,32 @@ impl Server {
                 .send_all(responses.map_err(|_| unreachable!()))
                 .then(|_| Ok(())),
         );
+    }
+
+    fn git<P: Into<PathBuf>>(&self, path: P) -> Rc<git::GitProvider> {
+        let path = path.into();
+        let mut gits = self.gits.borrow_mut();
+        let git = if let Some(git) = gits.find(&mut |git: Rc<git::GitProvider>| git.path == path) {
+            git.clone()
+        }
+        else {
+            gits.insert(git::GitProvider::new(path))
+        };
+
+        git
+    }
+
+    fn network<P: Into<PathBuf>>(&self, path: P) -> Rc<network::NetworkProvider> {
+        let path = path.into();
+        let mut networks = self.networks.borrow_mut();
+        let net = if let Some(net) = networks.find(&mut |net: Rc<network::NetworkProvider>| net.path == path) {
+            net.clone()
+        }
+        else {
+            networks.insert(network::NetworkProvider::new(path))
+        };
+
+        net
     }
 }
 

@@ -42,6 +42,7 @@ pub struct Version {
     epoch_version: time::Global,
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct OperationEnvelope {
     pub epoch_head: Option<Oid>,
     pub operation: Operation,
@@ -743,6 +744,36 @@ impl WorkTree {
         self.cur_epoch().buffer_deferred_ops_len(file_id)
     }
 
+    pub fn max_point(&self, buffer_id: BufferId) -> Result<Point, Error> {
+        let file_id = self.buffer_file_id(buffer_id)?;
+        self.cur_epoch().max_point(file_id)
+    }
+
+    pub fn longest_row(&self, buffer_id: BufferId) -> Result<u32, Error> {
+        let file_id = self.buffer_file_id(buffer_id)?;
+        self.cur_epoch().longest_row(file_id)
+    }
+
+    pub fn line(&self, buffer_id: BufferId, row: u32) -> Result<Vec<u16>, Error> {
+        let file_id = self.buffer_file_id(buffer_id)?;
+        self.cur_epoch().line(file_id, row)
+    }
+
+    pub fn iter_at_point(&self, buffer_id: BufferId, point: Point) -> Result<buffer::Iter, Error> {
+        let file_id = self.buffer_file_id(buffer_id)?;
+        self.cur_epoch().iter_at_point(file_id, point)
+    }
+
+    pub fn len(&self, buffer_id: BufferId) -> Result<usize, Error> {
+        let file_id = self.buffer_file_id(buffer_id)?;
+        self.cur_epoch().len(file_id)
+    }
+
+    pub fn len_for_row(&self, buffer_id: BufferId, row: u32) -> Result<u32, Error> {
+        let file_id = self.buffer_file_id(buffer_id)?;
+        self.cur_epoch().len_for_row(file_id, row)
+    }
+
     fn cur_epoch(&self) -> Ref<Epoch> {
         self.epoch.as_ref().unwrap().borrow()
     }
@@ -1190,6 +1221,41 @@ impl<F: Future> MaybeDone<F> {
             MaybeDone::Pending(_) => None,
             MaybeDone::Done(result) => Some(result),
         }
+    }
+}
+
+struct OperationVisitor;
+
+impl<'de> serde::de::Deserialize<'de> for Operation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        Ok(Operation::deserialize(&deserializer.deserialize_bytes(OperationVisitor)?).unwrap().unwrap())
+    }
+}
+
+impl serde::ser::Serialize for Operation {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::ser::Serializer,
+    {
+        serializer.serialize_bytes(&self.serialize())
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for OperationVisitor {
+    type Value = Vec<u8>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(formatter, "Dunno")
+    }
+
+    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(v.to_vec())
     }
 }
 

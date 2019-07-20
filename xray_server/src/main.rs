@@ -1,4 +1,6 @@
+mod git;
 mod messages;
+mod network;
 mod server;
 mod fs;
 mod json_lines_codec;
@@ -6,6 +8,7 @@ mod json_lines_codec;
 extern crate bytes;
 extern crate futures;
 extern crate futures_cpupool;
+extern crate git2;
 extern crate ignore;
 extern crate parking_lot;
 extern crate serde;
@@ -17,6 +20,7 @@ extern crate tokio_io;
 extern crate tokio_process;
 extern crate tokio_uds;
 extern crate xray_core;
+extern crate uuid;
 
 use std::env;
 use futures::Stream;

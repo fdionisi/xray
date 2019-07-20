@@ -1,17 +1,20 @@
-use super::messages::{MessageToClient, MessageToServer, RequestId, Response, ServiceId};
-use super::Error;
-use bincode::{deserialize, serialize};
-use bytes::Bytes;
-use futures::stream::FuturesUnordered;
-use futures::task::{self, Task};
-use futures::{future, Async, Future, Poll, Stream};
-use never::Never;
-use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::mem;
 use std::rc::{Rc, Weak};
+
+use bincode::{deserialize, serialize};
+use bytes::Bytes;
+use futures::stream::FuturesUnordered;
+use futures::task::{self, Task};
+use futures::{future, Async, Future, Poll, Stream};
+use serde::{Deserialize, Serialize};
+
+use crate::messages::{MessageToClient, MessageToServer, RequestId, Response, ServiceId};
+use crate::Error;
+
+use xray_shared::never::Never;
 
 pub trait Service {
     type State: 'static + Serialize + for<'a> Deserialize<'a>;

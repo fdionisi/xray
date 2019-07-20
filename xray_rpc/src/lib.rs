@@ -1,10 +1,16 @@
+#[macro_use]
+extern crate serde_derive;
+
 pub mod client;
 mod messages;
 pub mod server;
+#[cfg(test)]
+pub mod stream_ext;
 
-pub use self::messages::{Response, ServiceId};
 use std::error;
 use std::fmt;
+
+pub use messages::{Response, ServiceId};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Error {
@@ -42,13 +48,15 @@ impl error::Error for Error {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::*;
-    use futures::{future, unsync, Async, Future, Sink, Stream};
-    use never::Never;
-    use notify_cell::{NotifyCell, NotifyCellObserver};
     use std::rc::Rc;
-    use stream_ext::StreamExt;
+
+    use futures::{future, unsync, Async, Future, Sink, Stream};
+    use xray_shared::never::Never;
+    use xray_shared::notify_cell::{NotifyCell, NotifyCellObserver};
     use tokio_core::reactor;
+
+    use super::*;
+    use crate::stream_ext::StreamExt;
 
     #[test]
     fn test_connection() {

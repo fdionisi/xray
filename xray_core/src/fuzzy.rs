@@ -137,7 +137,8 @@ impl<'a> Scorer<'a> {
                     if self.d[(i, j)] != SCORE_MIN
                         && (match_required || self.d[(i, j)] == self.m[(i, j)])
                     {
-                        match_required = i > 0 && j > 0
+                        match_required = i > 0
+                            && j > 0
                             && self.m[(i, j)] == self.d[(i - 1, j - 1)] + SCORE_MATCH_CONSECUTIVE;
                         positions[i] = j as usize;
                         j -= 1;

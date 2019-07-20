@@ -1,25 +1,28 @@
-use futures::task::{self, Task};
-use futures::{Async, Future, Poll, Stream};
-use serde_json;
 use std::boxed::Box;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::marker::Unsize;
 use std::ops::CoerceUnsized;
 use std::rc::{Rc, Weak};
-use BackgroundExecutor;
+
+use futures::task::{self, Task};
+use futures::{Async, Future, Poll, Stream};
+use serde_json;
+
+use crate::usize_map::UsizeMap;
+use crate::BackgroundExecutor;
 
 pub type ViewId = usize;
 
 pub trait View: Stream<Item = (), Error = ()> {
     fn component_name(&self) -> &'static str;
-    fn will_mount(&mut self, &mut Window, WeakViewHandle<Self>)
+    fn will_mount(&mut self, _window: &mut Window, _handle: WeakViewHandle<Self>)
     where
         Self: Sized,
     {
     }
     fn render(&self) -> serde_json::Value;
-    fn dispatch_action(&mut self, serde_json::Value, &mut Window) {}
+    fn dispatch_action(&mut self, _action: serde_json::Value, _window: &mut Window) {}
 }
 
 pub struct Window(Rc<RefCell<Inner>>);
@@ -36,8 +39,7 @@ pub struct WindowUpdateStream {
 pub struct Inner {
     background: Option<BackgroundExecutor>,
     root_view: Option<ViewHandle>,
-    next_view_id: ViewId,
-    views: HashMap<ViewId, Rc<RefCell<View<Item = (), Error = ()>>>>,
+    views: UsizeMap<Rc<RefCell<View<Item = (), Error = ()>>>>,
     inserted: HashSet<ViewId>,
     removed: HashSet<ViewId>,
     focused: Option<ViewId>,
@@ -72,8 +74,7 @@ impl Window {
         Window(Rc::new(RefCell::new(Inner {
             background,
             root_view: None,
-            next_view_id: 0,
-            views: HashMap::new(),
+            views: UsizeMap::new(),
             inserted: HashSet::new(),
             removed: HashSet::new(),
             focused: None,
@@ -111,12 +112,6 @@ impl Window {
     }
 
     pub fn add_view<T: 'static + View>(&mut self, view: T) -> ViewHandle {
-        let view_id = {
-            let mut inner = self.0.borrow_mut();
-            inner.next_view_id += 1;
-            inner.next_view_id - 1
-        };
-
         let view_rc = Rc::new(RefCell::new(view));
         let weak_view = Rc::downgrade(&view_rc);
         view_rc
@@ -124,7 +119,7 @@ impl Window {
             .will_mount(self, WeakViewHandle(weak_view));
 
         let mut inner = self.0.borrow_mut();
-        inner.views.insert(view_id, view_rc);
+        let view_id = inner.views.add(view_rc);
         inner.inserted.insert(view_id);
         inner.notify();
         ViewHandle {
@@ -303,6 +298,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use xray_shared::notify_cell::NotifyCell;
+
     use super::*;
 
     #[test]
@@ -317,8 +314,6 @@ mod tests {
         handle: Option<ViewHandle>,
         updates: NotifyCell<()>,
     }
-
-    use notify_cell::NotifyCell;
 
     impl TestView {
         fn new(add_child: bool) -> Self {

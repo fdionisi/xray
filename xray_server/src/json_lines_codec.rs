@@ -1,9 +1,9 @@
-use std::io;
 use bytes::BytesMut;
 use serde::{Deserialize, Serialize};
 use serde_json;
-use tokio_io::codec::{Decoder, Encoder};
+use std::io;
 use std::marker::PhantomData;
+use tokio_io::codec::{Decoder, Encoder};
 
 pub struct JsonLinesCodec<In, Out> {
     phantom1: PhantomData<In>,

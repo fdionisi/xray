@@ -1,31 +1,33 @@
 [package]
 name = "xray_core"
 version = "0.1.0"
-authors = ["Nathan Sobo <nathan@github.com>"]
+authors = ["Nathan Sobo <nathan@github.com>", "Federico <mail@fdionisi.me>"]
 license = "MIT"
+edition = "2018"
 
 [dependencies]
-bincode = "1.0"
-bytes = { version ="0.4", features = ["serde"] }
+bytes = { version = "0.4", features = ["serde"] }
 futures = "0.1"
 lazy_static = "1.0"
+memo_core = { path = "../memo_core" }
 parking_lot = "0.5"
-seahash = "3.0"
 serde = "1.0"
 serde_derive = "1.0"
 serde_json = "1.0"
-smallvec = "0.6.0"
+xray_shared = { path = "../xray_shared" }
+xray_rpc = { path = "../xray_rpc" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
 
 [dev-dependencies]
-rand = "0.3"
 futures-cpupool = "0.1"
+rand = "0.3"
 tokio-core = "0.1"
-tokio-timer = "0.2"
+tokio-timer = "0.2.1"
+uuid = { version = "0.7", features = ["v4", "serde", "u128"] }
 criterion = "0.2"
 
 [[bench]]
 name = "bench"
-harness = false
+harness = true

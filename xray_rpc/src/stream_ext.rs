@@ -33,12 +33,9 @@ where
         Self: 'a,
     {
         let delay = time::Duration::from_millis(millis);
-        Box::new(
-            self.zip(
-                Interval::new(time::Instant::now() + delay, delay).map_err(|_| unreachable!()),
-            )
-            .and_then(|(item, _)| Ok(item)),
-        )
+        Box::new(self.zip(
+            Interval::new(time::Instant::now() + delay, delay).map_err(|_| unreachable!()),
+        ).and_then(|(item, _)| Ok(item)))
     }
 }
 
