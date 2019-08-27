@@ -235,10 +235,8 @@ impl RemoteProject {
             .expect("The server should create services for each tree in our project state.");
 
         let git_provider = Rc::new(git::RemoteGitProvider::new(git_service));
-        let network_provider = Rc::new(network::RemoteNetworkProvider::new(
-            foreground.clone(),
-            network_service,
-        ));
+        let network_provider =
+            network::RemoteNetworkProvider::new(foreground.clone(), network_service);
 
         let oid = state.oids.get(&tree_id).unwrap();
         WorkTree::new(

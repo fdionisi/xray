@@ -352,25 +352,22 @@ impl Peer {
             self.service
                 .request(ServiceRequest::OpenWorkspace(workspace_id))
                 .map_err(|e| e.into())
-                .and_then(move |response| {
-                    match response {
-                        Ok(ServiceResponse::OpenedWorkspace(service_id)) => {
-                            service
-                                .take_service(service_id)
-                                .map_err(|e| WorkspaceOpenError::from(e))
-                        },
-                        Err(err) => match err {
-                            ServiceError::WorkspaceNotFound(id) => Err(WorkspaceOpenError::NotFound(id))
+                .and_then(move |response| match response {
+                    Ok(ServiceResponse::OpenedWorkspace(service_id)) => service
+                        .take_service(service_id)
+                        .map_err(|e| WorkspaceOpenError::from(e)),
+                    Err(err) => match err {
+                        ServiceError::WorkspaceNotFound(id) => {
+                            Err(WorkspaceOpenError::NotFound(id))
                         }
-                    }
+                    },
                 })
                 .and_then(|workspace_service| {
-                    RemoteWorkspace::new(foreground, workspace_service)
-                        .map_err(|e| match e {
-                            Error::Rpc(err) => WorkspaceOpenError::from(err),
-                            _ => panic!("unknown error")
-                        })
-                })
+                    RemoteWorkspace::new(foreground, workspace_service).map_err(|e| match e {
+                        Error::Rpc(err) => WorkspaceOpenError::from(err),
+                        _ => panic!("unknown error"),
+                    })
+                }),
         )
     }
 }
@@ -462,6 +459,7 @@ mod tests {
     use tokio_core::reactor;
 
     use crate::stream_ext::StreamExt;
+    use crate::tests::{network::TestNetworkProvider, work_tree::TestWorkTree};
     use crate::work_tree::WorkTree;
 
     use super::*;
@@ -487,9 +485,11 @@ mod tests {
             vec![PeerState { workspaces: vec![] }]
         );
 
+        let network = Rc::new(TestNetworkProvider::new());
+        let (_, _, work_tree, _) = WorkTree::basic(Some(network.clone()));
         server
             .borrow_mut()
-            .open_local_workspace(replica_id, Vec::<Rc<WorkTree>>::new());
+            .open_local_workspace(replica_id, vec![work_tree]);
         peer_list_updates.wait_next(&mut reactor);
         assert_eq!(
             peer_list.borrow().state(),
@@ -497,6 +497,8 @@ mod tests {
                 workspaces: vec![WorkspaceDescriptor { id: 0 }],
             }]
         );
+
+        peer_list.borrow().open_first_workspace(0);
     }
 
     fn connect(reactor: &mut reactor::Core, server: Rc<RefCell<App>>, client: Rc<RefCell<App>>) {

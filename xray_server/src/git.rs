@@ -1,11 +1,11 @@
 use std::ffi::OsString;
 use std::io;
-use std::path::{PathBuf, Path};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use futures::{future, stream, Future, Stream};
 use git2::{ObjectType, Repository, Tree};
-use xray_core::fs::{FileType, DirEntry};
+use xray_core::fs::{DirEntry, FileType};
 use xray_core::git::{self, Oid};
 
 pub struct GitProvider {
@@ -19,7 +19,7 @@ impl GitProvider {
 
         GitProvider {
             path: path.as_ref().to_path_buf(),
-            repo
+            repo,
         }
     }
 

@@ -82,9 +82,7 @@ impl WorkTree {
             let network_updates = network.updates();
             foreground
                 .execute(Box::new(network_updates.for_each(move |operation| {
-                    if let Some(op) = operation {
-                        work_tree_updater.apply_ops(vec![op]);
-                    }
+                    work_tree_updater.apply_ops(vec![operation]);
 
                     Ok(())
                 })))

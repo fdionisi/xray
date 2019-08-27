@@ -1,15 +1,15 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use futures::{future, Future, Stream};
-use xray_core::network::{self, Operation, OperationEnvelope};
-use xray_core::notify_cell::NotifyCell;
+use xray_core::network::{self, NetworkNotify, Operation, OperationEnvelope};
 use xray_core::Error;
 
 pub struct NetworkProvider {
     pub path: PathBuf,
     inner: RefCell<NetworkProviderInner>,
-    updates: NotifyCell<Option<Operation>>,
+    notify: Rc<RefCell<NetworkNotify>>,
 }
 
 struct NetworkProviderInner {
@@ -21,14 +21,16 @@ impl NetworkProvider {
         Self {
             path,
             inner: RefCell::new(NetworkProviderInner::new()),
-            updates: NotifyCell::new(None),
+            notify: Rc::new(RefCell::new(NetworkNotify::new())),
         }
     }
 
     fn broadcast_one(&self, envelope: OperationEnvelope) {
         let mut inner = self.inner.borrow_mut();
 
-        self.updates.set(Some(envelope.operation.clone()));
+        self.notify
+            .borrow_mut()
+            .broadcast_op(envelope.operation.clone());
 
         inner.insert(envelope);
     }
@@ -58,8 +60,8 @@ impl network::NetworkProvider for NetworkProvider {
         ))
     }
 
-    fn updates(&self) -> Box<dyn Stream<Item = Option<Operation>, Error = ()>> {
-        Box::new(self.updates.observe())
+    fn updates(&self) -> Box<dyn Stream<Item = Operation, Error = ()>> {
+        self.notify.borrow_mut().updates()
     }
 }
 

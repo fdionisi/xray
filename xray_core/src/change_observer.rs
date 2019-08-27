@@ -73,11 +73,11 @@ impl memo_core::ChangeObserver for ChangeObserver {
         self.tree.set(tree_changes.clone());
 
         if let Some(o) = change_observer {
-            o.set(tree_changes)
+            o.set(tree_changes);
         }
 
         if let Some(o) = updates_observer {
-            o.set(())
+            o.set(());
         }
     }
 }
