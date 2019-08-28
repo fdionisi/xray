@@ -252,7 +252,7 @@ impl BufferView {
             .all(|selection| selection.start == selection.end)
     }
 
-    fn mutate_selections<F>(&mut self, f: F)
+    fn mutate_selections<F>(&self, f: F)
     where
         F: FnOnce(&Buffer, &mut Vec<Range<Point>>) -> Vec<Range<Point>>,
     {
@@ -283,93 +283,64 @@ impl BufferView {
         self.autoscroll_to_cursor(false);
     }
 
-    pub fn add_selection_above(&mut self) {
+    fn add_selection_internal<C, F>(&mut self, can_perform: C, next_row: F)
+    where
+        C: Fn(u32) -> bool,
+        F: Fn(u32) -> u32,
+    {
         self.mutate_selections(|buffer, selections| {
-            let mut new_selections = Vec::new();
+            selections
+                .iter()
+                .fold(vec![], |mut new_selections, selection| {
+                    let selection_start = selection.start;
+                    let selection_end = selection.end;
 
-            for selection in selections.iter() {
-                let selection_start = selection.start;
-                let selection_end = selection.end;
-
-                if selection_start.row != selection_end.row {
-                    continue;
-                }
-
-                let goal_column = selection_end.column;
-                let mut row = selection_start.row;
-                while row > 0 {
-                    row -= 1;
-                    let max_column = buffer.len_for_row(row).unwrap();
-
-                    let start_column;
-                    let end_column;
-                    let add_selection;
-                    if selection_start == selection_end {
-                        start_column = cmp::min(goal_column, max_column);
-                        end_column = cmp::min(goal_column, max_column);
-                        add_selection = selection_end.column == 0 || end_column > 0;
-                    } else {
-                        start_column = cmp::min(selection_start.column, max_column);
-                        end_column = cmp::min(goal_column, max_column);
-                        add_selection = start_column != end_column;
+                    if selection_start.row != selection_end.row {
+                        return new_selections;
                     }
 
-                    if add_selection {
-                        new_selections.push(selection.start..selection.end);
-                        new_selections
-                            .push(Point::new(row, start_column)..Point::new(row, end_column));
-                        break;
+                    let goal_column = selection_end.column;
+                    let mut row = selection_start.row;
+                    while can_perform(row) {
+                        row = next_row(row);
+                        let max_column = buffer.len_for_row(row).unwrap();
+
+                        let start_column;
+                        let end_column;
+
+                        let add_selection = if selection_start == selection_end {
+                            start_column = cmp::min(goal_column, max_column);
+                            end_column = cmp::min(goal_column, max_column);
+                            selection_end.column == 0 || end_column > 0
+                        } else {
+                            start_column = cmp::min(selection_start.column, max_column);
+                            end_column = cmp::min(goal_column, max_column);
+                            start_column != end_column
+                        };
+
+                        if add_selection {
+                            new_selections.push(selection.start..selection.end);
+                            new_selections
+                                .push(Point::new(row, start_column)..Point::new(row, end_column));
+                            break;
+                        }
                     }
-                }
-            }
-            new_selections
+
+                    new_selections
+                })
         });
+    }
+
+    pub fn add_selection_above(&mut self) {
+        self.add_selection_internal(|row| row > 0, |row| row - 1);
 
         self.autoscroll_to_cursor(false);
     }
 
     pub fn add_selection_below(&mut self) {
-        self.mutate_selections(|buffer, selections| {
-            let max_row = buffer.max_point().unwrap().row;
+        let max_row = self.buffer.max_point().unwrap().row;
 
-            let mut new_selections = Vec::new();
-            for selection in selections.iter() {
-                let selection_start = selection.start;
-                let selection_end = selection.end;
-                if selection_start.row != selection_end.row {
-                    continue;
-                }
-
-                let goal_column = selection_end.column;
-                let mut row = selection_start.row;
-                while row < max_row {
-                    row += 1;
-                    let max_column = buffer.len_for_row(row).unwrap();
-
-                    let start_column;
-                    let end_column;
-                    let add_selection;
-                    if selection_start == selection_end {
-                        start_column = cmp::min(goal_column, max_column);
-                        end_column = cmp::min(goal_column, max_column);
-                        add_selection = selection_end.column == 0 || end_column > 0;
-                    } else {
-                        start_column = cmp::min(selection_start.column, max_column);
-                        end_column = cmp::min(goal_column, max_column);
-                        add_selection = start_column != end_column;
-                    }
-
-                    if add_selection {
-                        new_selections.push(selection.start..selection.end);
-                        new_selections
-                            .push(Point::new(row, start_column)..Point::new(row, end_column));
-                        break;
-                    }
-                }
-            }
-
-            new_selections
-        });
+        self.add_selection_internal(|row| row < max_row, |row| row + 1);
 
         self.autoscroll_to_cursor(false);
     }
@@ -755,13 +726,10 @@ impl BufferView {
     }
 
     fn autoscroll_to_cursor(&mut self, center: bool) {
-        let anchor = {
-            let selections = self.selections();
-            let selection = selections.last().unwrap();
-            selection.end
-        };
-
-        self.autoscroll_to_range(anchor..anchor, center)
+        let selections = self.selections();
+        selections
+            .last()
+            .map(|selection| self.autoscroll_to_range(selection.end..selection.end, center));
     }
 
     fn flush_vertical_autoscroll_to_selection(&mut self) {
@@ -1981,5 +1949,70 @@ mod tests {
             reversed: true,
             remote: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod benches {
+    use test::Bencher;
+
+    use super::BufferView;
+    use crate::{
+        buffer::{Buffer, Point},
+        tests::buffer::TestBuffer,
+        Error,
+    };
+
+    #[bench]
+    fn add_selection_above(b: &mut Bencher) -> Result<(), Error> {
+        let mut buffer_view = create_buffer_view_with_selections(100)?;
+
+        b.iter(|| buffer_view.add_selection_above());
+
+        Ok(())
+    }
+
+    #[bench]
+    fn add_selection_below(b: &mut Bencher) -> Result<(), Error> {
+        let mut buffer_view = create_buffer_view_with_selections(100)?;
+
+        b.iter(|| buffer_view.add_selection_below());
+
+        Ok(())
+    }
+
+    #[bench]
+    fn edit(b: &mut Bencher) -> Result<(), Error> {
+        let mut buffer_view = create_buffer_view_with_selections(50)?;
+
+        b.iter(|| {
+            buffer_view.edit("a");
+            buffer_view.edit("b");
+            buffer_view.edit("c");
+        });
+
+        Ok(())
+    }
+
+    fn create_buffer_view_with_selections(lines: u32) -> Result<BufferView, Error> {
+        let mut buffer_view = create_buffer_view(lines)?;
+        for i in 0..lines {
+            buffer_view.add_selection(Point::new(i, 0), Point::new(i, 0));
+        }
+
+        Ok(buffer_view)
+    }
+
+    fn create_buffer_view(lines: u32) -> Result<BufferView, Error> {
+        let buffer = Buffer::basic();
+        for i in 0..lines {
+            let len = buffer.len()?;
+            buffer.edit(
+                vec![len..len],
+                format!("Lorem ipsum dolor sit amet {}\n", i).as_str(),
+            )?;
+        }
+
+        Ok(BufferView::new(buffer, None))
     }
 }

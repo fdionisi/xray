@@ -47,7 +47,7 @@ impl error::Error for Error {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub mod tests {
     use std::rc::Rc;
 
     use futures::{future, unsync, Async, Future, Sink, Stream};

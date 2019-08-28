@@ -26,8 +26,3 @@ rand = "0.3"
 tokio-core = "0.1"
 tokio-timer = "0.2.1"
 uuid = { version = "0.7", features = ["v4", "serde", "u128"] }
-criterion = "0.2"
-
-[[bench]]
-name = "bench"
-harness = true

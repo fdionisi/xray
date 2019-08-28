@@ -27,7 +27,6 @@ impl Buffer {
         handle: Rc<BufferHandler>,
         observer: Rc<ChangeObserver>,
     ) -> Self {
-
         Self {
             id,
             handle,
@@ -526,7 +525,7 @@ pub mod tests {
     //         7
     //     );
     // }
-    //
+
     // #[test]
     // fn test_selection_replication() {
     //     use stream_ext::StreamExt;
@@ -646,13 +645,135 @@ pub mod tests {
 
     pub trait TestBuffer {
         fn basic() -> Rc<Buffer>;
+        fn open_one(tree: &Rc<WorkTree>) -> Rc<Buffer>;
     }
 
     impl TestBuffer for Buffer {
         fn basic() -> Rc<Buffer> {
             let (_, _, tree, _) = WorkTree::basic(None);
+            Buffer::open_one(&tree)
+        }
+
+        fn open_one(tree: &Rc<WorkTree>) -> Rc<Buffer> {
             let basic_buffer = PathBuf::from("a");
             tree.open_text_file(&basic_buffer).wait().unwrap()
         }
+    }
+}
+
+#[cfg(test)]
+mod benches {
+    use std::cmp;
+    use std::rc::Rc;
+    use test::Bencher;
+
+    use super::{Buffer, Point, SelectionSetId};
+    use crate::{tests::buffer::TestBuffer, Error};
+
+    #[bench]
+    fn add_selection_above(b: &mut Bencher) -> Result<(), Error> {
+        let (buffer, set_id) = create_buffer_view_with_selections(100)?;
+
+        b.iter(|| add_selection_above_(&buffer, set_id));
+
+        Ok(())
+    }
+
+    #[bench]
+    fn add_selection_below(b: &mut Bencher) -> Result<(), Error> {
+        let (buffer, set_id) = create_buffer_view_with_selections(100)?;
+
+        b.iter(|| add_selection_below_(&buffer, set_id));
+
+        Ok(())
+    }
+
+    fn create_buffer_view_with_selections(
+        lines: u32,
+    ) -> Result<(Rc<Buffer>, SelectionSetId), Error> {
+        let buffer = create_buffer(lines)?;
+        let set_id = buffer.add_selection_set(vec![Point::zero()..Point::zero()])?;
+        let selections = (0..lines)
+            .map(|i| Point::new(i, 0)..Point::new(i, 0))
+            .collect();
+        buffer.replace_selection_set(set_id, selections)?;
+
+        Ok((buffer, set_id))
+    }
+
+    fn create_buffer(lines: u32) -> Result<Rc<Buffer>, Error> {
+        let buffer = Buffer::basic();
+        for i in 0..lines {
+            let len = buffer.len()?;
+            buffer.edit(
+                vec![len..len],
+                format!("Lorem ipsum dolor sit amet {}\n", i).as_str(),
+            )?;
+        }
+
+        Ok(buffer)
+    }
+
+    fn add_selection_above_(buffer: &Rc<Buffer>, set_id: SelectionSetId) {
+        add_selection_internal(buffer, set_id, |row| row > 0, |row| row - 1);
+    }
+
+    fn add_selection_below_(buffer: &Rc<Buffer>, set_id: SelectionSetId) {
+        let max_row = buffer.max_point().unwrap().row;
+
+        add_selection_internal(buffer, set_id, |row| row < max_row, |row| row + 1);
+    }
+
+    fn add_selection_internal<C, F>(
+        buffer: &Rc<Buffer>,
+        set_id: SelectionSetId,
+        can_perform: C,
+        next_row: F,
+    ) where
+        C: Fn(u32) -> bool,
+        F: Fn(u32) -> u32,
+    {
+        buffer
+            .mutate_selections(set_id, |buffer, selections| {
+                let mut new_selections = Vec::new();
+
+                for selection in selections.iter() {
+                    let selection_start = selection.start;
+                    let selection_end = selection.end;
+
+                    if selection_start.row != selection_end.row {
+                        continue;
+                    }
+
+                    let goal_column = selection_end.column;
+                    let mut row = selection_start.row;
+                    while can_perform(row) {
+                        row = next_row(row);
+                        let max_column = buffer.len_for_row(row).unwrap();
+
+                        let start_column;
+                        let end_column;
+
+                        let add_selection = if selection_start == selection_end {
+                            start_column = cmp::min(goal_column, max_column);
+                            end_column = cmp::min(goal_column, max_column);
+                            selection_end.column == 0 || end_column > 0
+                        } else {
+                            start_column = cmp::min(selection_start.column, max_column);
+                            end_column = cmp::min(goal_column, max_column);
+                            start_column != end_column
+                        };
+
+                        if add_selection {
+                            new_selections.push(selection.start..selection.end);
+                            new_selections
+                                .push(Point::new(row, start_column)..Point::new(row, end_column));
+                            break;
+                        }
+                    }
+                }
+                new_selections
+            })
+            .unwrap();
     }
 }

@@ -751,6 +751,15 @@ pub mod tests {
             Rc<WorkTree>,
             Rc<TestNetworkProvider>,
         );
+        fn replica(
+            handle: Rc<reactor::Handle>,
+            git: Rc<TestGitProvider>,
+            base: Oid,
+            network: Rc<TestNetworkProvider>,
+        ) -> Rc<WorkTree>;
+        fn data(
+            network: Option<Rc<TestNetworkProvider>>,
+        ) -> (Rc<TestGitProvider>, Oid, Rc<TestNetworkProvider>);
     }
 
     impl TestWorkTree for WorkTree {
@@ -774,27 +783,40 @@ pub mod tests {
         ) {
             let reactor = reactor::Core::new().unwrap();
             let handle = Rc::new(reactor.handle());
+            let (git, oid, network) = WorkTree::data(network);
 
+            let tree = WorkTree::replica(handle, git.clone(), oid, network.clone());
+
+            (git, oid, tree, network)
+        }
+
+        fn replica(
+            handle: Rc<reactor::Handle>,
+            git: Rc<TestGitProvider>,
+            base: Oid,
+            network: Rc<TestNetworkProvider>,
+        ) -> Rc<WorkTree> {
+            WorkTree::new_sync(
+                handle,
+                uuid::Uuid::from_u128(0),
+                Some(base),
+                git.clone(),
+                network.clone(),
+            )
+            .unwrap()
+        }
+
+        fn data(
+            network: Option<Rc<TestNetworkProvider>>,
+        ) -> (Rc<TestGitProvider>, Oid, Rc<TestNetworkProvider>) {
             let network = match network {
                 Some(n) => n.clone(),
                 _ => Rc::new(TestNetworkProvider::new()),
             };
-
             let git = Rc::new(TestGitProvider::new());
             let oid = git.gen_oid();
-
             git.commit(oid, vec![BaseEntry::file(1, "a", "")]);
-
-            let tree = WorkTree::new_sync(
-                handle,
-                uuid::Uuid::from_u128(0),
-                Some(oid),
-                git.clone(),
-                network.clone(),
-            )
-            .unwrap();
-
-            (git, oid, tree, network)
+            (git, oid, network)
         }
     }
 }

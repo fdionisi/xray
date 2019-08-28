@@ -196,16 +196,15 @@ pub mod tests {
     use std::cell::RefCell;
 
     use futures::{future, Future, Stream};
-    use xray_shared::notify_cell::NotifyCell;
 
     use crate::{
-        network::{NetworkProvider, Operation, OperationEnvelope},
+        network::{NetworkNotify, NetworkProvider, Operation, OperationEnvelope},
         Error,
     };
 
     pub struct TestNetworkProvider {
         inner: RefCell<TestNetworkProviderInner>,
-        updates: NotifyCell<Option<Operation>>,
+        notify: RefCell<NetworkNotify>,
     }
 
     struct TestNetworkProviderInner {
@@ -216,14 +215,16 @@ pub mod tests {
         pub fn new() -> Self {
             Self {
                 inner: RefCell::new(TestNetworkProviderInner::new()),
-                updates: NotifyCell::new(None),
+                notify: RefCell::new(NetworkNotify::new()),
             }
         }
 
         fn broadcast_one(&self, envelope: OperationEnvelope) {
             let mut inner = self.inner.borrow_mut();
 
-            self.updates.set(Some(envelope.operation.clone()));
+            self.notify
+                .borrow_mut()
+                .broadcast_op(envelope.operation.clone());
 
             inner.insert(envelope);
         }
@@ -254,7 +255,7 @@ pub mod tests {
         }
 
         fn updates(&self) -> Box<dyn Stream<Item = Operation, Error = ()>> {
-            unimplemented!()
+            self.notify.borrow_mut().updates()
         }
     }
 

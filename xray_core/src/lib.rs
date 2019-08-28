@@ -1,5 +1,7 @@
-#![feature(unsize, coerce_unsized)]
+#![feature(unsize, coerce_unsized, test)]
 
+#[cfg(test)]
+extern crate test;
 #[macro_use]
 extern crate lazy_static;
 #[macro_use]
@@ -37,9 +39,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use futures::future::{Executor, Future};
-pub use memo_core::{
-    Error as MemoError, ReplicaId,
-};
+pub use memo_core::{Error as MemoError, ReplicaId};
 pub use xray_rpc::Error as RpcError;
 
 pub type ForegroundExecutor = Rc<dyn Executor<Box<dyn Future<Item = (), Error = ()> + 'static>>>;
