@@ -58,11 +58,11 @@ impl Workspace for LocalWorkspace {
         self.user_id
     }
 
-    fn project(&self) -> Ref<Project> {
+    fn project(&self) -> Ref<dyn Project> {
         self.project.borrow()
     }
 
-    fn project_mut(&self) -> RefMut<Project> {
+    fn project_mut(&self) -> RefMut<dyn Project> {
         self.project.borrow_mut()
     }
 }
@@ -92,11 +92,11 @@ impl Workspace for RemoteWorkspace {
         self.user_id
     }
 
-    fn project(&self) -> Ref<Project> {
+    fn project(&self) -> Ref<dyn Project> {
         self.project.borrow()
     }
 
-    fn project_mut(&self) -> RefMut<Project> {
+    fn project_mut(&self) -> RefMut<dyn Project> {
         self.project.borrow_mut()
     }
 }

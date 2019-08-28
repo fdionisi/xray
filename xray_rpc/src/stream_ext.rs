@@ -28,14 +28,20 @@ where
         reactor.run(TakeOne(self)).unwrap()
     }
 
-    fn throttle<'a>(self, millis: u64) -> Box<'a + Stream<Item = Self::Item, Error = Self::Error>>
+    fn throttle<'a>(
+        self,
+        millis: u64,
+    ) -> Box<dyn Stream<Item = Self::Item, Error = Self::Error> + 'a>
     where
         Self: 'a,
     {
         let delay = time::Duration::from_millis(millis);
-        Box::new(self.zip(
-            Interval::new(time::Instant::now() + delay, delay).map_err(|_| unreachable!()),
-        ).and_then(|(item, _)| Ok(item)))
+        Box::new(
+            self.zip(
+                Interval::new(time::Instant::now() + delay, delay).map_err(|_| unreachable!()),
+            )
+            .and_then(|(item, _)| Ok(item)),
+        )
     }
 }
 

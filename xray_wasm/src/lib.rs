@@ -38,8 +38,8 @@ pub struct Executor(Rc<RefCell<ExecutorState>>);
 
 struct ExecutorState {
     next_spawn_id: usize,
-    futures: HashMap<usize, Rc<RefCell<Spawn<Future<Item = (), Error = ()>>>>>,
-    pending: HashMap<usize, Rc<RefCell<Spawn<Future<Item = (), Error = ()>>>>>,
+    futures: HashMap<usize, Rc<RefCell<Spawn<dyn Future<Item = (), Error = ()>>>>>,
+    pending: HashMap<usize, Rc<RefCell<Spawn<dyn Future<Item = (), Error = ()>>>>>,
     notify_handle: Option<Arc<NotifyHandle>>,
 }
 

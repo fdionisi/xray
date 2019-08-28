@@ -26,7 +26,7 @@ pub trait Project {
         &self,
         tree_id: TreeId,
         relative_path: &PathBuf,
-    ) -> Box<Future<Item = Rc<Buffer>, Error = Error>>;
+    ) -> Box<dyn Future<Item = Rc<Buffer>, Error = Error>>;
     fn search_paths(
         &self,
         needle: &str,
@@ -138,7 +138,7 @@ impl Project for LocalProject {
         &self,
         tree_id: TreeId,
         relative_path: &PathBuf,
-    ) -> Box<Future<Item = Rc<Buffer>, Error = Error>> {
+    ) -> Box<dyn Future<Item = Rc<Buffer>, Error = Error>> {
         if let Some(tree) = self.trees.get(&tree_id) {
             tree.open_text_file(relative_path)
         } else {
@@ -360,7 +360,7 @@ impl xray_rpc::server::Service for ProjectService {
         &mut self,
         request: Self::Request,
         _connection: &xray_rpc::server::Connection,
-    ) -> Option<Box<Future<Item = Self::Response, Error = Never>>> {
+    ) -> Option<Box<dyn Future<Item = Self::Response, Error = Never>>> {
         match request {
             RpcRequest::OpenPath {
                 tree_id,

@@ -1,9 +1,9 @@
 use bytes::Bytes;
-use git;
-use network;
 use futures::{future, stream, Future, IntoFuture, Sink, Stream};
 use futures_cpupool::CpuPool;
+use git;
 use messages::{IncomingMessage, OutgoingMessage};
+use network;
 use std::cell::RefCell;
 use std::error::Error;
 use std::io;
@@ -13,11 +13,11 @@ use std::rc::Rc;
 use tokio_core::net::{TcpListener, TcpStream};
 use tokio_core::reactor;
 use tokio_io::codec;
-use xray_core::ReplicaId;
 use xray_core::app::{App, Command, WindowId};
-use xray_core::work_tree::WorkTree;
 use xray_core::never::Never;
 use xray_core::weak_set::WeakSet;
+use xray_core::work_tree::WorkTree;
+use xray_core::ReplicaId;
 
 #[derive(Clone)]
 pub struct Server {
@@ -35,11 +35,7 @@ impl Server {
         Server {
             // Get it locally
             replica_id: uuid::Uuid::new_v4(),
-            app: App::new(
-                headless,
-                foreground,
-                background,
-            ),
+            app: App::new(headless, foreground, background),
             reactor,
             gits: Rc::new(RefCell::new(WeakSet::new())),
             networks: Rc::new(RefCell::new(WeakSet::new())),
@@ -174,7 +170,7 @@ impl Server {
     fn handle_app_message(
         &self,
         message: IncomingMessage,
-    ) -> Box<Future<Item = OutgoingMessage, Error = Never>> {
+    ) -> Box<dyn Future<Item = OutgoingMessage, Error = Never>> {
         let result = match message {
             IncomingMessage::OpenWorkspace { paths } => {
                 Box::new(self.open_workspace(paths).into_future())
@@ -230,11 +226,14 @@ impl Server {
                     Some(git.head()),
                     git,
                     network,
-                ).unwrap()
+                )
+                .unwrap()
             })
             .collect();
 
-        self.app.borrow_mut().open_local_workspace(self.replica_id, roots);
+        self.app
+            .borrow_mut()
+            .open_local_workspace(self.replica_id, roots);
 
         Ok(())
     }
@@ -245,32 +244,34 @@ impl Server {
             .map_err(|_| "Error binding address".to_owned())?;
         let app = self.app.clone();
         let reactor = self.reactor.clone();
-        let handle_incoming =
-            listener
-                .incoming()
-                .map_err(|_| eprintln!("Error accepting incoming connection"))
-                .for_each(move |(socket, _)| {
-                    socket.set_nodelay(true).unwrap();
-                    let transport = codec::length_delimited::Framed::<_, Bytes>::new(socket);
-                    let (tx, rx) = transport.split();
-                    let connection =
-                        App::connect_to_client(app.clone(), rx.map(|frame| frame.into()));
-                    reactor.spawn(tx.send_all(
-                        connection.map_err(|_| -> io::Error { unreachable!() }),
-                    ).then(|result| {
-                        if let Err(error) = result {
-                            eprintln!("Error sending message to client on TCP socket: {}", error);
-                        }
+        let handle_incoming = listener
+            .incoming()
+            .map_err(|_| eprintln!("Error accepting incoming connection"))
+            .for_each(move |(socket, _)| {
+                socket.set_nodelay(true).unwrap();
+                let transport = codec::length_delimited::Framed::<_, Bytes>::new(socket);
+                let (tx, rx) = transport.split();
+                let connection = App::connect_to_client(app.clone(), rx.map(|frame| frame.into()));
+                reactor.spawn(
+                    tx.send_all(connection.map_err(|_| -> io::Error { unreachable!() }))
+                        .then(|result| {
+                            if let Err(error) = result {
+                                eprintln!(
+                                    "Error sending message to client on TCP socket: {}",
+                                    error
+                                );
+                            }
 
-                        Ok(())
-                    }));
-                    Ok(())
-                });
+                            Ok(())
+                        }),
+                );
+                Ok(())
+            });
         self.reactor.spawn(handle_incoming);
         Ok(())
     }
 
-    fn connect_to_peer(&self, address: SocketAddr) -> Box<Future<Item = (), Error = String>> {
+    fn connect_to_peer(&self, address: SocketAddr) -> Box<dyn Future<Item = (), Error = String>> {
         let reactor = self.reactor.clone();
         let app = self.app.clone();
         Box::new(
@@ -295,7 +296,8 @@ impl Server {
                                     connection
                                         .map(|bytes| bytes.into())
                                         .map_err(|_| -> io::Error { unreachable!() }),
-                                ).then(|result| {
+                                )
+                                .then(|result| {
                                     if let Err(error) = result {
                                         eprintln!(
                                             "Error sending message to server on TCP socket: {}",
@@ -329,8 +331,7 @@ impl Server {
         let mut gits = self.gits.borrow_mut();
         let git = if let Some(git) = gits.find(&mut |git: Rc<git::GitProvider>| git.path == path) {
             git.clone()
-        }
-        else {
+        } else {
             gits.insert(git::GitProvider::new(path))
         };
 
@@ -340,10 +341,11 @@ impl Server {
     fn network<P: Into<PathBuf>>(&self, path: P) -> Rc<network::NetworkProvider> {
         let path = path.into();
         let mut networks = self.networks.borrow_mut();
-        let net = if let Some(net) = networks.find(&mut |net: Rc<network::NetworkProvider>| net.path == path) {
+        let net = if let Some(net) =
+            networks.find(&mut |net: Rc<network::NetworkProvider>| net.path == path)
+        {
             net.clone()
-        }
-        else {
+        } else {
             networks.insert(network::NetworkProvider::new(path))
         };
 
@@ -351,7 +353,7 @@ impl Server {
     }
 }
 
-fn report_input_errors<S>(incoming: S) -> Box<Stream<Item = OutgoingMessage, Error = ()>>
+fn report_input_errors<S>(incoming: S) -> Box<dyn Stream<Item = OutgoingMessage, Error = ()>>
 where
     S: 'static + Stream<Item = OutgoingMessage, Error = io::Error>,
 {

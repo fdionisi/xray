@@ -222,7 +222,10 @@ impl WorkTree {
         root
     }
 
-    pub fn open_text_file(&self, path: &PathBuf) -> Box<Future<Item = Rc<Buffer>, Error = Error>> {
+    pub fn open_text_file(
+        &self,
+        path: &PathBuf,
+    ) -> Box<dyn Future<Item = Rc<Buffer>, Error = Error>> {
         let handle = self.handle.clone();
         let observer = self.observer.clone();
         let buffers = self.buffers.clone();

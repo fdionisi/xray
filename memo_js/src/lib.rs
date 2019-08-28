@@ -537,7 +537,7 @@ impl memo::GitProvider for GitProviderWrapper {
     fn base_entries(
         &self,
         oid: memo::Oid,
-    ) -> Box<Stream<Item = memo::DirEntry, Error = io::Error>> {
+    ) -> Box<dyn Stream<Item = memo::DirEntry, Error = io::Error>> {
         let iterator = GitProviderWrapper::base_entries(self, &hex::encode(oid));
         Box::new(
             AsyncIteratorToStream::new(iterator)
@@ -549,7 +549,7 @@ impl memo::GitProvider for GitProviderWrapper {
         &self,
         oid: memo::Oid,
         path: &Path,
-    ) -> Box<Future<Item = String, Error = io::Error>> {
+    ) -> Box<dyn Future<Item = String, Error = io::Error>> {
         Box::new(
             JsFuture::from(GitProviderWrapper::base_text(
                 self,

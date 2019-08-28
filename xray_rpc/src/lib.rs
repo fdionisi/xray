@@ -51,9 +51,9 @@ pub(crate) mod tests {
     use std::rc::Rc;
 
     use futures::{future, unsync, Async, Future, Sink, Stream};
+    use tokio_core::reactor;
     use xray_shared::never::Never;
     use xray_shared::notify_cell::{NotifyCell, NotifyCellObserver};
-    use tokio_core::reactor;
 
     use super::*;
     use crate::stream_ext::StreamExt;
@@ -106,11 +106,9 @@ pub(crate) mod tests {
         let response = reactor.run(request_future).unwrap();
         assert_eq!(response, TestServiceResponse::Ack);
         assert!(child_client.state().is_ok());
-        assert!(
-            reactor
-                .run(child_client.request(TestRequest::Increment(5)))
-                .is_ok()
-        );
+        assert!(reactor
+            .run(child_client.request(TestRequest::Increment(5)))
+            .is_ok());
         assert_eq!(Rc::strong_count(&child_model), 3);
 
         drop(child_client);
@@ -356,7 +354,7 @@ pub(crate) mod tests {
             &mut self,
             request: Self::Request,
             connection: &server::Connection,
-        ) -> Option<Box<Future<Item = Self::Response, Error = Never>>> {
+        ) -> Option<Box<dyn Future<Item = Self::Response, Error = Never>>> {
             match request {
                 TestRequest::Increment(count) => {
                     self.model.increment_by(count);
@@ -377,7 +375,6 @@ pub(crate) mod tests {
                     Some(Box::new(future::ok(TestServiceResponse::Ack)))
                 }
                 TestRequest::CreateServiceAsync => {
-                    use futures;
                     use std::thread;
 
                     let (tx, rx) = futures::sync::oneshot::channel();

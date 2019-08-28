@@ -24,7 +24,7 @@ enum WorkspaceViewAction {
 
 pub struct WorkspaceView {
     foreground: ForegroundExecutor,
-    workspace: Rc<RefCell<Workspace>>,
+    workspace: Rc<RefCell<dyn Workspace>>,
     active_buffer_view: Option<WeakViewHandle<BufferView>>,
     center_pane: Option<ViewHandle>,
     modal: Option<ViewHandle>,

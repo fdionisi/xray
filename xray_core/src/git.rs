@@ -25,7 +25,7 @@ pub struct RemoteGitProvider {
 }
 
 pub struct GitProviderService {
-    git_provider: Rc<GitProvider>,
+    git_provider: Rc<dyn GitProvider>,
 }
 
 impl RemoteGitProvider {
@@ -35,13 +35,13 @@ impl RemoteGitProvider {
 }
 
 impl GitProviderService {
-    pub fn new(git_provider: Rc<GitProvider>) -> Self {
+    pub fn new(git_provider: Rc<dyn GitProvider>) -> Self {
         Self { git_provider }
     }
 }
 
 impl GitProvider for RemoteGitProvider {
-    fn base_entries(&self, oid: Oid) -> Box<Stream<Item = DirEntry, Error = io::Error>> {
+    fn base_entries(&self, oid: Oid) -> Box<dyn Stream<Item = DirEntry, Error = io::Error>> {
         Box::new(
             self.service
                 .request(RpcRequest::BaseEntries { oid })
@@ -54,7 +54,11 @@ impl GitProvider for RemoteGitProvider {
         )
     }
 
-    fn base_text(&self, oid: Oid, path: &Path) -> Box<Future<Item = String, Error = io::Error>> {
+    fn base_text(
+        &self,
+        oid: Oid,
+        path: &Path,
+    ) -> Box<dyn Future<Item = String, Error = io::Error>> {
         Box::new(
             self.service
                 .request(RpcRequest::BaseText {
@@ -84,7 +88,7 @@ impl xray_rpc::server::Service for GitProviderService {
         &mut self,
         request: Self::Request,
         _connection: &xray_rpc::server::Connection,
-    ) -> Option<Box<Future<Item = Self::Response, Error = Never>>> {
+    ) -> Option<Box<dyn Future<Item = Self::Response, Error = Never>>> {
         match request {
             RpcRequest::BaseEntries { oid } => Some(Box::new(
                 self.git_provider

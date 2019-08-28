@@ -132,7 +132,7 @@ impl NetworkProvider for RemoteNetworkProvider {
 }
 
 impl NetworkProviderService {
-    pub fn new(network_provider: Rc<NetworkProvider>) -> Self {
+    pub fn new(network_provider: Rc<dyn NetworkProvider>) -> Self {
         let updates = network_provider.updates();
         Self {
             network_provider,
@@ -166,7 +166,7 @@ impl xray_rpc::server::Service for NetworkProviderService {
         &mut self,
         request: Self::Request,
         _connection: &xray_rpc::server::Connection,
-    ) -> Option<Box<Future<Item = Self::Response, Error = Never>>> {
+    ) -> Option<Box<dyn Future<Item = Self::Response, Error = Never>>> {
         match request {
             RpcRequest::Broadcast(envelopes) => match envelopes.len() {
                 0 => None,

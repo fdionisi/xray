@@ -11,7 +11,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub type EntryId = usize;
 
 pub trait File {
-    fn write_utf16(&self, snapshot: Vec<u16>) -> Box<Future<Item = (), Error = io::Error>>;
+    fn write_utf16(&self, snapshot: Vec<u16>) -> Box<dyn Future<Item = (), Error = io::Error>>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

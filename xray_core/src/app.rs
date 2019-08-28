@@ -214,7 +214,7 @@ impl App {
     pub fn connect_to_server<S>(
         &self,
         incoming: S,
-    ) -> Box<Future<Item = client::Connection, Error = rpc::Error>>
+    ) -> Box<dyn Future<Item = client::Connection, Error = rpc::Error>>
     where
         S: 'static + Stream<Item = Bytes, Error = io::Error>,
     {
@@ -262,7 +262,7 @@ impl PeerList {
     fn connect_to_server<S>(
         peer_list: Rc<RefCell<PeerList>>,
         incoming: S,
-    ) -> Box<Future<Item = client::Connection, Error = rpc::Error>>
+    ) -> Box<dyn Future<Item = client::Connection, Error = rpc::Error>>
     where
         S: 'static + Stream<Item = Bytes, Error = io::Error>,
     {
@@ -323,13 +323,13 @@ impl Peer {
         }
     }
 
-    fn updates(&self) -> Result<Box<Stream<Item = (), Error = ()>>, rpc::Error> {
+    fn updates(&self) -> Result<Box<dyn Stream<Item = (), Error = ()>>, rpc::Error> {
         Ok(Box::new(self.service.updates()?.map(|_| ())))
     }
 
     fn open_first_workspace(
         &self,
-    ) -> Box<Future<Item = Option<RemoteWorkspace>, Error = WorkspaceOpenError>> {
+    ) -> Box<dyn Future<Item = Option<RemoteWorkspace>, Error = WorkspaceOpenError>> {
         match self.service.latest_state() {
             Ok(state) => {
                 if let Some(workspace_id) = state.workspace_ids.first() {
@@ -407,7 +407,7 @@ impl server::Service for AppService {
         &mut self,
         request: Self::Request,
         connection: &server::Connection,
-    ) -> Option<Box<Future<Item = Self::Response, Error = Never>>> {
+    ) -> Option<Box<dyn Future<Item = Self::Response, Error = Never>>> {
         let response = match request {
             ServiceRequest::OpenWorkspace(workspace_id) => {
                 let app = self.app.borrow();

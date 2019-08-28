@@ -30,7 +30,7 @@ pub struct BufferView {
     horizontal_margin: u32,
     vertical_autoscroll: Option<AutoScrollRequest>,
     horizontal_autoscroll: Cell<Option<Range<Point>>>,
-    delegate: Option<WeakViewHandle<BufferViewDelegate>>,
+    delegate: Option<WeakViewHandle<dyn BufferViewDelegate>>,
 }
 
 #[derive(Debug, Eq, PartialEq, Serialize)]
@@ -98,7 +98,10 @@ struct AutoScrollRequest {
 }
 
 impl BufferView {
-    pub fn new(buffer: Rc<Buffer>, delegate: Option<WeakViewHandle<BufferViewDelegate>>) -> Self {
+    pub fn new(
+        buffer: Rc<Buffer>,
+        delegate: Option<WeakViewHandle<dyn BufferViewDelegate>>,
+    ) -> Self {
         let selection_set_id = buffer
             .add_selection_set(vec![Point::zero()..Point::zero()])
             .unwrap();
@@ -628,7 +631,7 @@ impl BufferView {
 
     pub fn select_line(&mut self) {
         self.mutate_selections(|buffer, selections| {
-            let max_point = buffer.max_point().unwrap();;
+            let max_point = buffer.max_point().unwrap();
             selections
                 .iter()
                 .map(|selection| {

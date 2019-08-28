@@ -39,7 +39,7 @@ pub struct WindowUpdateStream {
 pub struct Inner {
     background: Option<BackgroundExecutor>,
     root_view: Option<ViewHandle>,
-    views: UsizeMap<Rc<RefCell<View<Item = (), Error = ()>>>>,
+    views: UsizeMap<Rc<RefCell<dyn View<Item = (), Error = ()>>>>,
     inserted: HashSet<ViewId>,
     removed: HashSet<ViewId>,
     focused: Option<ViewId>,
@@ -242,7 +242,7 @@ impl Inner {
         self.update_stream_task.take().map(|task| task.notify());
     }
 
-    fn get_view(&self, id: ViewId) -> Option<Rc<RefCell<View<Item = (), Error = ()>>>> {
+    fn get_view(&self, id: ViewId) -> Option<Rc<RefCell<dyn View<Item = (), Error = ()>>>> {
         self.views.get(&id).map(|view| view.clone())
     }
 }
