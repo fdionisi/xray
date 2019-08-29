@@ -274,6 +274,7 @@ impl Server {
     fn connect_to_peer(&self, address: SocketAddr) -> Box<dyn Future<Item = (), Error = String>> {
         let reactor = self.reactor.clone();
         let app = self.app.clone();
+        let replica_id = self.replica_id;
         Box::new(
             TcpStream::connect(&address, &self.reactor)
                 .map_err(move |error| {
@@ -288,7 +289,7 @@ impl Server {
                     let transport = codec::length_delimited::Framed::<_, Bytes>::new(socket);
                     let (tx, rx) = transport.split();
                     let app = app.borrow();
-                    app.connect_to_server(rx.map(|frame| frame.into()))
+                    app.connect_to_server(replica_id, rx.map(|frame| frame.into()))
                         .map_err(|error| format!("RPC error: {}", error))
                         .and_then(move |connection| {
                             reactor.spawn(

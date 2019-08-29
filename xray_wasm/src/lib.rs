@@ -318,14 +318,17 @@ impl Server {
         };
     }
 
-    pub fn connect_to_peer(&mut self, incoming: Receiver, outgoing: JsSink) {
+    pub fn connect_to_peer(&mut self, replica_id: Vec<u8>, incoming: Receiver, outgoing: JsSink) {
         use futures::future::Executor;
 
         let executor = self.executor.clone();
         let connect_future = self
             .app
             .borrow_mut()
-            .connect_to_server(incoming.map_err(|_| unreachable!()))
+            .connect_to_server(
+                uuid::Uuid::from_slice(&replica_id).unwrap(),
+                incoming.map_err(|_| unreachable!()),
+            )
             .map_err(|error| eprintln!("RPC error: {}", error))
             .and_then(move |connection| {
                 executor

@@ -66,7 +66,6 @@ impl WorkspaceView {
         T: 'static + Future<Item = Rc<Buffer>, Error = Error>,
     {
         if let Some(window_handle) = self.window_handle.clone() {
-            let user_id = self.workspace.borrow().user_id();
             let view_handle = self.self_handle.clone();
             self.foreground
                 .execute(Box::new(buffer.then(move |result| {

@@ -36,7 +36,6 @@ pub trait Project {
 }
 
 pub struct LocalProject {
-    replica_id: ReplicaId,
     trees: UsizeMap<Rc<WorkTree>>,
 }
 
@@ -59,7 +58,6 @@ type NetworkServiceId = xray_rpc::ServiceId;
 
 #[derive(Deserialize, Serialize)]
 pub struct RpcState {
-    replica_id: ReplicaId,
     oids: HashMap<TreeId, Option<git::Oid>>,
     trees: HashMap<TreeId, (GitServiceId, NetworkServiceId)>,
 }
@@ -115,9 +113,8 @@ enum MatchMarker {
 }
 
 impl LocalProject {
-    pub fn new(replica_id: ReplicaId, trees: Vec<Rc<WorkTree>>) -> Self {
+    pub fn new(trees: Vec<Rc<WorkTree>>) -> Self {
         let mut project = LocalProject {
-            replica_id,
             trees: UsizeMap::new(),
         };
 
@@ -179,6 +176,7 @@ impl Project for LocalProject {
 // What a mess...
 impl RemoteProject {
     pub fn new(
+        replica_id: ReplicaId,
         foreground: ForegroundExecutor,
         service: xray_rpc::client::Service<ProjectService>,
     ) -> impl Future<Item = Self, Error = Error> {
@@ -190,6 +188,7 @@ impl RemoteProject {
         let strm = stream::unfold(trees_iter, move |mut vals| match vals.next() {
             Some((tree_id, (git_service_id, network_service_id))) => Some(
                 RemoteProject::create_work_tree(
+                    replica_id,
                     foreground_clone.clone(),
                     service_clone.clone(),
                     (
@@ -219,6 +218,7 @@ impl RemoteProject {
     }
 
     fn create_work_tree(
+        replica_id: ReplicaId,
         foreground: ForegroundExecutor,
         service: xray_rpc::client::Service<ProjectService>,
         tree: (TreeId, (GitServiceId, NetworkServiceId)),
@@ -241,7 +241,7 @@ impl RemoteProject {
         let oid = state.oids.get(&tree_id).unwrap();
         WorkTree::new(
             foreground.clone(),
-            state.replica_id,
+            replica_id,
             oid.clone(),
             git_provider,
             network_provider,
@@ -329,7 +329,6 @@ impl xray_rpc::server::Service for ProjectService {
 
     fn init(&mut self, connection: &xray_rpc::server::Connection) -> Self::State {
         let mut state = RpcState {
-            replica_id: self.project.borrow().replica_id,
             oids: HashMap::new(),
             trees: HashMap::new(),
         };
@@ -707,7 +706,7 @@ pub mod tests {
             )?
         };
 
-        let project = LocalProject::new(uuid, vec![tree]);
+        let project = LocalProject::new(vec![tree]);
         let (mut search, observer) = project.search_paths("sub2", 10, true);
 
         assert_eq!(search.poll(), Ok(Async::Ready(())));
@@ -836,7 +835,7 @@ pub mod tests {
             )?
         };
 
-        Ok(LocalProject::new(uuid, vec![tree_1, tree_2]))
+        Ok(LocalProject::new(vec![tree_1, tree_2]))
     }
 
     fn summarize_results(

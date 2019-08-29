@@ -45,7 +45,6 @@ pub use xray_rpc::Error as RpcError;
 pub type ForegroundExecutor = Rc<dyn Executor<Box<dyn Future<Item = (), Error = ()> + 'static>>>;
 pub type BackgroundExecutor =
     Rc<dyn Executor<Box<dyn Future<Item = (), Error = ()> + Send + 'static>>>;
-pub type UserId = usize;
 
 pub(crate) trait IntoShared {
     fn into_shared(self) -> Rc<RefCell<Self>>;
