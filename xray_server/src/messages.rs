@@ -1,7 +1,8 @@
 use serde_json;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use xray_core::{ViewId, WindowId, WindowUpdate};
+use xray_core::app::WindowId;
+use xray_core::window::{ViewId, WindowUpdate};
 
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type")]

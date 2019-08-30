@@ -85,7 +85,7 @@ suite("WorkTree", () => {
     const tree2BufferChanges: Change[] = [];
     tree2BufferC.onChange(c => tree2BufferChanges.push(...c.textChanges));
     assert.deepStrictEqual(await collectOps(tree2.applyOps(ops1)), []);
-    assert.strictEqual(tree1BufferC.getText(), "oid0-base-text");
+    assert.strictEqual(tree2BufferC.getText(), "oid0-base-text");
     assert.deepStrictEqual(tree1BufferChanges, []);
     assert.deepStrictEqual(tree2BufferChanges, [
       { start: point(0, 4), end: point(0, 5), text: "-" },

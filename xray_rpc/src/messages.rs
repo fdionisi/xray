@@ -1,6 +1,8 @@
-use super::Error;
-use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
+
+use bytes::Bytes;
+
+use super::Error;
 
 pub type RequestId = usize;
 pub type ServiceId = usize;

@@ -1,27 +1,20 @@
-extern crate bytes;
-extern crate futures;
-extern crate wasm_bindgen;
-#[macro_use]
-extern crate xray_core;
-extern crate serde;
 #[macro_use]
 extern crate serde_derive;
-extern crate serde_json;
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::mem;
+use std::rc::{Rc, Weak};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::executor::{self, Notify, Spawn};
 use futures::unsync::mpsc;
 use futures::{future, stream};
 use futures::{Async, AsyncSink, Future, Poll, Sink, Stream};
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::io;
-use std::mem;
-use std::rc::{Rc, Weak};
-use std::sync::Arc;
 use wasm_bindgen::prelude::*;
-use xray_core::app::Command;
-use xray_core::{cross_platform, App, ViewId, WindowId, WindowUpdate};
+use xray_core::app::{App, Command, WindowId};
+use xray_core::window::{ViewId, WindowUpdate};
 
 #[derive(Serialize, Debug)]
 #[serde(tag = "type")]
@@ -45,8 +38,8 @@ pub struct Executor(Rc<RefCell<ExecutorState>>);
 
 struct ExecutorState {
     next_spawn_id: usize,
-    futures: HashMap<usize, Rc<RefCell<Spawn<Future<Item = (), Error = ()>>>>>,
-    pending: HashMap<usize, Rc<RefCell<Spawn<Future<Item = (), Error = ()>>>>>,
+    futures: HashMap<usize, Rc<RefCell<Spawn<dyn Future<Item = (), Error = ()>>>>>,
+    pending: HashMap<usize, Rc<RefCell<Spawn<dyn Future<Item = (), Error = ()>>>>>,
     notify_handle: Option<Arc<NotifyHandle>>,
 }
 
@@ -72,8 +65,6 @@ pub struct Server {
     executor: Executor,
     app: Rc<RefCell<App>>,
 }
-
-struct FileProvider;
 
 // The leading ./ is redundant here, but it's needed due to a limitation in wasm_bindgen which
 // would otherwise interpret lib/support as an NPM module.
@@ -249,6 +240,7 @@ impl Sink for JsSink {
 #[wasm_bindgen]
 impl Server {
     pub fn new() -> Self {
+        console_error_panic_hook::set_once();
         let foreground_executor = Rc::new(Executor::new());
         // TODO: use a requestIdleCallback-based executor here instead.
         let background_executor = foreground_executor.clone();
@@ -257,7 +249,6 @@ impl Server {
                 false,
                 foreground_executor.clone(),
                 background_executor.clone(),
-                FileProvider,
             ),
             executor: Executor::new(),
         }
@@ -318,7 +309,8 @@ impl Server {
             Err(_) => {
                 let error = stream::once(Ok(OutgoingMessage::Error {
                     description: format!("No window exists for id {}", window_id),
-                })).map(|message| serde_json::to_vec(&message).unwrap());
+                }))
+                .map(|message| serde_json::to_vec(&message).unwrap());
                 self.executor
                     .execute(Box::new(outgoing.send_all(error).then(|_| Ok(()))))
                     .unwrap();
@@ -326,37 +318,34 @@ impl Server {
         };
     }
 
-    pub fn connect_to_peer(&mut self, incoming: Receiver, outgoing: JsSink) {
+    pub fn connect_to_peer(&mut self, replica_id: Vec<u8>, incoming: Receiver, outgoing: JsSink) {
         use futures::future::Executor;
 
         let executor = self.executor.clone();
-        let connect_future = self.app
+        let connect_future = self
+            .app
             .borrow_mut()
-            .connect_to_server(incoming.map_err(|_| unreachable!()))
+            .connect_to_server(
+                uuid::Uuid::from_slice(&replica_id).unwrap(),
+                incoming.map_err(|_| unreachable!()),
+            )
             .map_err(|error| eprintln!("RPC error: {}", error))
             .and_then(move |connection| {
                 executor
                     .execute(Box::new(
-                        outgoing.send_all(
-                            connection
-                                // TODO: go back to using Vec<u8> for outgoing messages in xray_core.
-                                .map(|bytes| bytes.to_vec())
-                                .map_err(|_| unreachable!()),
-                        ).then(|_| Ok(())),
+                        outgoing
+                            .send_all(
+                                connection
+                                    // TODO: go back to using Vec<u8> for outgoing messages in xray_core.
+                                    .map(|bytes| bytes.to_vec())
+                                    .map_err(|_| unreachable!()),
+                            )
+                            .then(|_| Ok(())),
                     ))
                     .unwrap();
                 Ok(())
             });
         self.executor.execute(Box::new(connect_future)).unwrap();
-    }
-}
-
-impl xray_core::fs::FileProvider for FileProvider {
-    fn open(
-        &self,
-        _: &cross_platform::Path,
-    ) -> Box<Future<Item = Box<xray_core::fs::File>, Error = io::Error>> {
-        unimplemented!()
     }
 }
 
@@ -379,7 +368,8 @@ impl Test {
         use futures::future::Executor;
         self.executor
             .execute(Box::new(
-                outgoing.send_all(incoming.map(|bytes| bytes.to_vec()))
+                outgoing
+                    .send_all(incoming.map(|bytes| bytes.to_vec()))
                     .then(|_| Ok(())),
             ))
             .unwrap();

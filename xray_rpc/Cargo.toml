@@ -1,0 +1,18 @@
+[package]
+name = "xray_rpc"
+version = "0.1.0"
+authors = ["Nathan Sobo <nathan@github.com>", "Federico Dionisi <mail@fdionisi.me>"]
+edition = "2018"
+
+[dependencies]
+bincode = "1.0"
+bytes = { version = "0.4", features = ["serde"] }
+futures = "0.1"
+serde = "1.0"
+serde_derive = "1.0"
+xray_shared = { path = "../xray_shared" }
+
+[dev-dependencies]
+rand = "0.3"
+tokio-core = "0.1"
+tokio-timer = "0.2.1"

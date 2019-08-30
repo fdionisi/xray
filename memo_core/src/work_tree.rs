@@ -15,8 +15,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 pub trait GitProvider {
-    fn base_entries(&self, oid: Oid) -> Box<Stream<Item = DirEntry, Error = io::Error>>;
-    fn base_text(&self, oid: Oid, path: &Path) -> Box<Future<Item = String, Error = io::Error>>;
+    fn base_entries(&self, oid: Oid) -> Box<dyn Stream<Item = DirEntry, Error = io::Error>>;
+    fn base_text(&self, oid: Oid, path: &Path)
+        -> Box<dyn Future<Item = String, Error = io::Error>>;
 }
 
 pub trait ChangeObserver {
@@ -32,8 +33,8 @@ pub struct WorkTree {
     next_local_selection_set_id: Rc<RefCell<LocalSelectionSetId>>,
     deferred_ops: Rc<RefCell<HashMap<epoch::Id, Vec<epoch::Operation>>>>,
     lamport_clock: Rc<RefCell<time::Lamport>>,
-    git: Rc<GitProvider>,
-    observer: Option<Rc<ChangeObserver>>,
+    git: Rc<dyn GitProvider>,
+    observer: Option<Rc<dyn ChangeObserver>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -42,6 +43,7 @@ pub struct Version {
     epoch_version: time::Global,
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct OperationEnvelope {
     pub epoch_head: Option<Oid>,
     pub operation: Operation,
@@ -77,7 +79,7 @@ enum MaybeDone<F: Future> {
 }
 
 struct BaseTextRequest {
-    future: MaybeDone<Box<Future<Item = String, Error = io::Error>>>,
+    future: MaybeDone<Box<dyn Future<Item = String, Error = io::Error>>>,
     path: PathBuf,
 }
 
@@ -91,8 +93,8 @@ struct SwitchEpoch {
         Rc<RefCell<HashMap<BufferId, HashMap<LocalSelectionSetId, buffer::SelectionSetId>>>>,
     deferred_ops: Rc<RefCell<HashMap<epoch::Id, Vec<epoch::Operation>>>>,
     lamport_clock: Rc<RefCell<time::Lamport>>,
-    git: Rc<GitProvider>,
-    observer: Option<Rc<ChangeObserver>>,
+    git: Rc<dyn GitProvider>,
+    observer: Option<Rc<dyn ChangeObserver>>,
 }
 
 impl WorkTree {
@@ -100,12 +102,12 @@ impl WorkTree {
         replica_id: ReplicaId,
         base: Option<Oid>,
         ops: I,
-        git: Rc<GitProvider>,
-        observer: Option<Rc<ChangeObserver>>,
+        git: Rc<dyn GitProvider>,
+        observer: Option<Rc<dyn ChangeObserver>>,
     ) -> Result<
         (
             WorkTree,
-            Box<Stream<Item = OperationEnvelope, Error = Error>>,
+            Box<dyn Stream<Item = OperationEnvelope, Error = Error>>,
         ),
         Error,
     >
@@ -126,9 +128,10 @@ impl WorkTree {
         };
 
         let ops = if ops.peek().is_none() {
-            Box::new(tree.reset(base)) as Box<Stream<Item = OperationEnvelope, Error = Error>>
+            Box::new(tree.reset(base)) as Box<dyn Stream<Item = OperationEnvelope, Error = Error>>
         } else {
-            Box::new(tree.apply_ops(ops)?) as Box<Stream<Item = OperationEnvelope, Error = Error>>
+            Box::new(tree.apply_ops(ops)?)
+                as Box<dyn Stream<Item = OperationEnvelope, Error = Error>>
         };
 
         Ok((tree, ops))
@@ -225,7 +228,7 @@ impl WorkTree {
                 epoch.id, epoch.head, fixup_ops,
             )));
             Ok(epoch_streams.into_iter().fold(
-                fixup_ops_stream as Box<Stream<Item = OperationEnvelope, Error = Error>>,
+                fixup_ops_stream as Box<dyn Stream<Item = OperationEnvelope, Error = Error>>,
                 |acc, stream| Box::new(acc.chain(stream)),
             ))
         } else {
@@ -237,7 +240,7 @@ impl WorkTree {
         &mut self,
         new_epoch_id: epoch::Id,
         new_head: Option<Oid>,
-    ) -> Box<Stream<Item = OperationEnvelope, Error = Error>> {
+    ) -> Box<dyn Stream<Item = OperationEnvelope, Error = Error>> {
         if self
             .epoch
             .as_ref()
@@ -269,7 +272,7 @@ impl WorkTree {
                             )))
                         })
                         .flatten(),
-                ) as Box<Stream<Item = OperationEnvelope, Error = Error>>
+                ) as Box<dyn Stream<Item = OperationEnvelope, Error = Error>>
             } else {
                 Box::new(stream::empty())
             };
@@ -437,7 +440,7 @@ impl WorkTree {
         self.cur_epoch().file_id(path).is_ok()
     }
 
-    pub fn open_text_file<P>(&self, path: P) -> Box<Future<Item = BufferId, Error = Error>>
+    pub fn open_text_file<P>(&self, path: P) -> Box<dyn Future<Item = BufferId, Error = Error>>
     where
         P: Into<PathBuf>,
     {
@@ -454,11 +457,11 @@ impl WorkTree {
     fn open_text_file_internal(
         path: PathBuf,
         epoch: Rc<RefCell<Epoch>>,
-        git: Rc<GitProvider>,
+        git: Rc<dyn GitProvider>,
         buffers: Rc<RefCell<HashMap<BufferId, FileId>>>,
         next_buffer_id: Rc<RefCell<BufferId>>,
         lamport_clock: Rc<RefCell<time::Lamport>>,
-    ) -> Box<Future<Item = BufferId, Error = Error>> {
+    ) -> Box<dyn Future<Item = BufferId, Error = Error>> {
         if let Some(buffer_id) = Self::existing_buffer(&epoch, &buffers, &path) {
             Box::new(future::ok(buffer_id))
         } else {
@@ -517,8 +520,8 @@ impl WorkTree {
     fn base_text(
         path: &Path,
         epoch: &RefCell<Epoch>,
-        git: &GitProvider,
-    ) -> Box<Future<Item = (FileId, String), Error = Error>> {
+        git: &dyn GitProvider,
+    ) -> Box<dyn Future<Item = (FileId, String), Error = Error>> {
         let epoch = epoch.borrow();
         match epoch.file_id(&path) {
             Ok(file_id) => {
@@ -743,6 +746,36 @@ impl WorkTree {
         self.cur_epoch().buffer_deferred_ops_len(file_id)
     }
 
+    pub fn max_point(&self, buffer_id: BufferId) -> Result<Point, Error> {
+        let file_id = self.buffer_file_id(buffer_id)?;
+        self.cur_epoch().max_point(file_id)
+    }
+
+    pub fn longest_row(&self, buffer_id: BufferId) -> Result<u32, Error> {
+        let file_id = self.buffer_file_id(buffer_id)?;
+        self.cur_epoch().longest_row(file_id)
+    }
+
+    pub fn line(&self, buffer_id: BufferId, row: u32) -> Result<Vec<u16>, Error> {
+        let file_id = self.buffer_file_id(buffer_id)?;
+        self.cur_epoch().line(file_id, row)
+    }
+
+    pub fn iter_at_point(&self, buffer_id: BufferId, point: Point) -> Result<buffer::Iter, Error> {
+        let file_id = self.buffer_file_id(buffer_id)?;
+        self.cur_epoch().iter_at_point(file_id, point)
+    }
+
+    pub fn len(&self, buffer_id: BufferId) -> Result<usize, Error> {
+        let file_id = self.buffer_file_id(buffer_id)?;
+        self.cur_epoch().len(file_id)
+    }
+
+    pub fn len_for_row(&self, buffer_id: BufferId, row: u32) -> Result<u32, Error> {
+        let file_id = self.buffer_file_id(buffer_id)?;
+        self.cur_epoch().len_for_row(file_id, row)
+    }
+
     fn cur_epoch(&self) -> Ref<Epoch> {
         self.epoch.as_ref().unwrap().borrow()
     }
@@ -959,8 +992,8 @@ impl SwitchEpoch {
         >,
         deferred_ops: Rc<RefCell<HashMap<epoch::Id, Vec<epoch::Operation>>>>,
         lamport_clock: Rc<RefCell<time::Lamport>>,
-        git: Rc<GitProvider>,
-        observer: Option<Rc<ChangeObserver>>,
+        git: Rc<dyn GitProvider>,
+        observer: Option<Rc<dyn ChangeObserver>>,
     ) -> Self {
         let last_seen = cur_epoch.borrow().id;
         Self {
@@ -1190,6 +1223,45 @@ impl<F: Future> MaybeDone<F> {
             MaybeDone::Pending(_) => None,
             MaybeDone::Done(result) => Some(result),
         }
+    }
+}
+
+struct OperationVisitor;
+
+impl<'de> serde::de::Deserialize<'de> for Operation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        Ok(
+            Operation::deserialize(&deserializer.deserialize_bytes(OperationVisitor)?)
+                .unwrap()
+                .unwrap(),
+        )
+    }
+}
+
+impl serde::ser::Serialize for Operation {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::ser::Serializer,
+    {
+        serializer.serialize_bytes(&self.serialize())
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for OperationVisitor {
+    type Value = Vec<u8>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(formatter, "Dunno")
+    }
+
+    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(v.to_vec())
     }
 }
 
@@ -1917,7 +1989,7 @@ mod tests {
     }
 
     impl GitProvider for TestGitProvider {
-        fn base_entries(&self, oid: Oid) -> Box<Stream<Item = DirEntry, Error = io::Error>> {
+        fn base_entries(&self, oid: Oid) -> Box<dyn Stream<Item = DirEntry, Error = io::Error>> {
             match self.commits.borrow().get(&oid) {
                 Some(tree) => Box::new(stream::iter_ok(tree.dir_entries().into_iter())),
                 None => Box::new(stream::once(Err(io::Error::new(
@@ -1931,7 +2003,7 @@ mod tests {
             &self,
             oid: Oid,
             path: &Path,
-        ) -> Box<Future<Item = String, Error = io::Error>> {
+        ) -> Box<dyn Future<Item = String, Error = io::Error>> {
             use futures::IntoFuture;
 
             Box::new(

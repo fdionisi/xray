@@ -1,17 +1,20 @@
-use super::messages::{MessageToClient, MessageToServer, RequestId, Response, ServiceId};
-use super::Error;
-use bincode::{deserialize, serialize};
-use bytes::Bytes;
-use futures::stream::FuturesUnordered;
-use futures::task::{self, Task};
-use futures::{future, Async, Future, Poll, Stream};
-use never::Never;
-use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::mem;
 use std::rc::{Rc, Weak};
+
+use bincode::{deserialize, serialize};
+use bytes::Bytes;
+use futures::stream::FuturesUnordered;
+use futures::task::{self, Task};
+use futures::{future, Async, Future, Poll, Stream};
+use serde::{Deserialize, Serialize};
+
+use crate::messages::{MessageToClient, MessageToServer, RequestId, Response, ServiceId};
+use crate::Error;
+
+use xray_shared::never::Never;
 
 pub trait Service {
     type State: 'static + Serialize + for<'a> Deserialize<'a>;
@@ -29,7 +32,7 @@ pub trait Service {
         &mut self,
         _request: Self::Request,
         _connection: &Connection,
-    ) -> Option<Box<Future<Item = Self::Response, Error = Never>>> {
+    ) -> Option<Box<dyn Future<Item = Self::Response, Error = Never>>> {
         None
     }
 }
@@ -41,7 +44,7 @@ trait RawBytesService {
         &mut self,
         request: Bytes,
         connection: &mut Connection,
-    ) -> Option<Box<Future<Item = Bytes, Error = Never>>>;
+    ) -> Option<Box<dyn Future<Item = Bytes, Error = Never>>>;
 }
 
 #[derive(Clone)]
@@ -49,13 +52,13 @@ pub struct Connection(Rc<RefCell<ConnectionState>>);
 
 struct ConnectionState {
     next_service_id: ServiceId,
-    services: HashMap<ServiceId, Rc<RefCell<RawBytesService>>>,
+    services: HashMap<ServiceId, Rc<RefCell<dyn RawBytesService>>>,
     client_service_handles: HashMap<ServiceId, ServiceHandle>,
     inserted: HashSet<ServiceId>,
     removed: HashSet<ServiceId>,
-    incoming: Box<Stream<Item = Bytes, Error = io::Error>>,
+    incoming: Box<dyn Stream<Item = Bytes, Error = io::Error>>,
     pending_responses:
-        Rc<RefCell<FuturesUnordered<Box<Future<Item = ResponseEnvelope, Error = Never>>>>>,
+        Rc<RefCell<FuturesUnordered<Box<dyn Future<Item = ResponseEnvelope, Error = Never>>>>>,
     pending_task: Option<Task>,
 }
 
@@ -226,8 +229,9 @@ impl Connection {
                     updates,
                     removals,
                     responses,
-                })).unwrap()
-                    .into();
+                }))
+                .unwrap()
+                .into();
             Ok(Async::Ready(Some(message)))
         } else {
             self.0.borrow_mut().pending_task = Some(task::current());
@@ -235,7 +239,7 @@ impl Connection {
         }
     }
 
-    fn take_service(&self, id: ServiceId) -> Option<Rc<RefCell<RawBytesService>>> {
+    fn take_service(&self, id: ServiceId) -> Option<Rc<RefCell<dyn RawBytesService>>> {
         self.0.borrow_mut().services.get(&id).cloned()
     }
 }
@@ -251,7 +255,8 @@ impl Stream for Connection {
             Err(error) => {
                 let message = serialize::<Result<MessageToClient, Error>>(&Err(Error::IoError(
                     format!("{}", error),
-                ))).unwrap();
+                )))
+                .unwrap();
                 return Ok(Async::Ready(Some(message.into())));
             }
         }
@@ -294,10 +299,10 @@ where
         &mut self,
         request: Bytes,
         connection: &mut Connection,
-    ) -> Option<Box<Future<Item = Bytes, Error = Never>>> {
+    ) -> Option<Box<dyn Future<Item = Bytes, Error = Never>>> {
         T::request(self, deserialize(&request).unwrap(), connection).map(|future| {
             Box::new(future.map(|item| serialize(&item).unwrap().into()))
-                as Box<Future<Item = Bytes, Error = Never>>
+                as Box<dyn Future<Item = Bytes, Error = Never>>
         })
     }
 }

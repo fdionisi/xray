@@ -43,7 +43,7 @@ class Server {
     );
   }
 
-  connectToWebsocket(url) {
+  connectToWebsocket(url, replica_id) {
     const socket = new WebSocket(url);
     socket.binaryType = "arraybuffer";
     const channel = this.xray.Channel.new();
@@ -55,6 +55,7 @@ class Server {
     });
 
     this.xrayServer.connect_to_peer(
+      replica_id,
       channel.take_receiver(),
       new JsSink({
         send(message) {
@@ -67,7 +68,7 @@ class Server {
   handleMessage(message) {
     switch (message.type) {
       case "ConnectToWebsocket":
-        this.connectToWebsocket(message.url);
+        this.connectToWebsocket(message.url, message.replica_id);
         break;
       case "Action":
         this.windowSender.send(encoder.encode(JSON.stringify(message)));

@@ -1,0 +1,17 @@
+[package]
+name = "xray_shared"
+version = "0.1.0"
+authors = ["Nathan Sobo <nathan@github.com>", "Federico <mail@fdionisi.me>"]
+edition = "2018"
+
+[dependencies]
+futures = "0.1"
+parking_lot = "0.5"
+serde = "1.0"
+serde_derive = "1.0"
+
+[dev-dependencies]
+futures-cpupool = "0.1"
+rand = "0.3"
+tokio-core = "0.1"
+tokio-timer = "0.2.1"

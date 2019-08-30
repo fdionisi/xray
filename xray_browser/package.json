@@ -2,6 +2,7 @@
   "name": "xray_browser",
   "license": "MIT",
   "dependencies": {
+    "uuid": "^3.3.2",
     "xray_wasm": "../xray_wasm",
     "xray_ui": "../xray_ui"
   },

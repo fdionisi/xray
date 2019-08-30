@@ -1,4 +1,5 @@
 use std::sync::{Arc, Weak};
+
 use futures::{Async, Poll, Stream};
 use futures::task::{self, Task};
 use parking_lot::RwLock;
@@ -157,14 +158,14 @@ impl<T: Clone> Drop for NotifyCell<T> {
 
 #[cfg(test)]
 mod tests {
-    extern crate futures_cpupool;
-    extern crate rand;
+    use std::collections::BTreeSet;
+
+    use futures::Future;
 
     use super::*;
-    use std::collections::BTreeSet;
-    use futures::Future;
-    use self::rand::Rng;
-    use self::futures_cpupool::CpuPool;
+
+    use rand::Rng;
+    use futures_cpupool::CpuPool;
 
     #[test]
     fn test_notify() {

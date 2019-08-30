@@ -1,15 +1,17 @@
-use super::messages::{MessageToClient, MessageToServer, RequestId, Response, ServiceId};
-use super::{server, Error};
-use bincode::{deserialize, serialize};
-use bytes::Bytes;
-use futures::{self, future, stream, unsync, Async, Future, Poll, Stream};
-use serde::{Deserialize, Serialize};
 use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::error;
 use std::io;
 use std::marker::PhantomData;
 use std::rc::{Rc, Weak};
+
+use bincode::{deserialize, serialize};
+use bytes::Bytes;
+use futures::{self, future, stream, unsync, Async, Future, Poll, Stream};
+use serde::{Deserialize, Serialize};
+
+use crate::messages::{MessageToClient, MessageToServer, RequestId, Response, ServiceId};
+use crate::{server, Error};
 
 pub struct Service<T: server::Service> {
     registration: Rc<ServiceRegistration>,
@@ -39,7 +41,7 @@ pub struct Connection(Rc<RefCell<ConnectionState>>);
 struct ConnectionState {
     next_request_id: RequestId,
     client_states: HashMap<ServiceId, ServiceState>,
-    incoming: Box<Stream<Item = Bytes, Error = io::Error>>,
+    incoming: Box<dyn Stream<Item = Bytes, Error = io::Error>>,
     outgoing_tx: unsync::mpsc::UnboundedSender<MessageToServer>,
     outgoing_rx: unsync::mpsc::UnboundedReceiver<MessageToServer>,
 }
@@ -55,7 +57,7 @@ impl<T: server::Service> Service<T> {
         Ok(deserialize(&client_state.state).unwrap())
     }
 
-    pub fn updates(&self) -> Result<Box<Stream<Item = T::Update, Error = ()>>, Error> {
+    pub fn updates(&self) -> Result<Box<dyn Stream<Item = T::Update, Error = ()>>, Error> {
         let connection = self.registration.connection()?;
         let mut connection = connection.borrow_mut();
         let client_state = connection
@@ -67,11 +69,14 @@ impl<T: server::Service> Service<T> {
         Ok(Box::new(deserialized_updates))
     }
 
-    pub fn request(&self, request: T::Request) -> Box<Future<Item = T::Response, Error = Error>> {
+    pub fn request(
+        &self,
+        request: T::Request,
+    ) -> Box<dyn Future<Item = T::Response, Error = Error>> {
         fn perform_request<T: server::Service>(
             registration: &Rc<ServiceRegistration>,
             request: T::Request,
-        ) -> Result<Box<Future<Item = T::Response, Error = Error>>, Error> {
+        ) -> Result<Box<dyn Future<Item = T::Response, Error = Error>>, Error> {
             let connection = registration.connection()?;
             let mut connection = connection.borrow_mut();
 
@@ -142,7 +147,7 @@ where
         }
     }
 
-    pub fn updates(&self) -> Result<Box<Stream<Item = (), Error = ()>>, Error> {
+    pub fn updates(&self) -> Result<Box<dyn Stream<Item = (), Error = ()>>, Error> {
         let latest_state_1 = self.latest_state.clone();
         let latest_state_2 = self.latest_state.clone();
         self.service.updates().map(|updates| {
@@ -153,11 +158,14 @@ where
                 *latest_state_2.borrow_mut() = Err(Error::ServiceDropped);
             });
             Box::new(update_latest_state.chain(clear_latest_state))
-                as Box<Stream<Item = (), Error = ()>>
+                as Box<dyn Stream<Item = (), Error = ()>>
         })
     }
 
-    pub fn request(&self, request: S::Request) -> Box<Future<Item = S::Response, Error = Error>> {
+    pub fn request(
+        &self,
+        request: S::Request,
+    ) -> Box<dyn Future<Item = S::Response, Error = Error>> {
         self.service.request(request)
     }
 
@@ -177,7 +185,7 @@ impl<T: server::Service> Clone for FullUpdateService<T> {
 }
 
 impl Connection {
-    pub fn new<S, B>(incoming: S) -> Box<Future<Item = (Self, Service<B>), Error = Error>>
+    pub fn new<S, B>(incoming: S) -> Box<dyn Future<Item = (Self, Service<B>), Error = Error>>
     where
         S: 'static + Stream<Item = Bytes, Error = io::Error>,
         B: 'static + server::Service,

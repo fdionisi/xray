@@ -2,6 +2,8 @@
 members = [
     "memo_core",
     "memo_js",
+    "xray_shared",
+    "xray_rpc",
     "xray_core",
     "xray_server",
     "xray_cli",

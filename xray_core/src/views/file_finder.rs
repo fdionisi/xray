@@ -1,9 +1,11 @@
-use cross_platform;
+use std::path::PathBuf;
+
 use futures::{Async, Poll, Stream};
-use notify_cell::{NotifyCell, NotifyCellObserver};
-use project::{PathSearch, PathSearchResult, PathSearchStatus, TreeId};
 use serde_json;
-use window::{View, WeakViewHandle, Window};
+
+use crate::notify_cell::{NotifyCell, NotifyCellObserver};
+use crate::project::{PathSearch, PathSearchResult, PathSearchStatus, TreeId};
+use crate::window::{View, WeakViewHandle, Window};
 
 pub trait FileFinderViewDelegate {
     fn search_paths(
@@ -13,16 +15,11 @@ pub trait FileFinderViewDelegate {
         include_ignored: bool,
     ) -> (PathSearch, NotifyCellObserver<PathSearchStatus>);
     fn did_close(&mut self);
-    fn did_confirm(
-        &mut self,
-        tree_id: TreeId,
-        relative_path: &cross_platform::Path,
-        window: &mut Window,
-    );
+    fn did_confirm(&mut self, tree_id: TreeId, relative_path: &PathBuf, window: &mut Window);
 }
 
-pub struct FileFinderView<T: FileFinderViewDelegate> {
-    delegate: WeakViewHandle<T>,
+pub struct FileFinderView {
+    delegate: WeakViewHandle<dyn FileFinderViewDelegate>,
     query: String,
     include_ignored: bool,
     selected_index: usize,
@@ -42,7 +39,7 @@ enum FileFinderAction {
     Close,
 }
 
-impl<T: FileFinderViewDelegate> View for FileFinderView<T> {
+impl View for FileFinderView {
     fn component_name(&self) -> &'static str {
         "FileFinder"
     }
@@ -70,12 +67,13 @@ impl<T: FileFinderViewDelegate> View for FileFinderView<T> {
     }
 }
 
-impl<T: FileFinderViewDelegate> Stream for FileFinderView<T> {
+impl Stream for FileFinderView {
     type Item = ();
     type Error = ();
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        let search_poll = self.search_updates
+        let search_poll = self
+            .search_updates
             .as_mut()
             .map(|s| s.poll())
             .unwrap_or(Ok(Async::NotReady))?;
@@ -97,8 +95,8 @@ impl<T: FileFinderViewDelegate> Stream for FileFinderView<T> {
     }
 }
 
-impl<T: FileFinderViewDelegate> FileFinderView<T> {
-    pub fn new(delegate: WeakViewHandle<T>) -> Self {
+impl FileFinderView {
+    pub fn new(delegate: WeakViewHandle<dyn FileFinderViewDelegate>) -> Self {
         Self {
             delegate,
             query: String::new(),
@@ -153,7 +151,8 @@ impl<T: FileFinderViewDelegate> FileFinderView<T> {
     }
 
     fn search(&mut self, window: &mut Window) {
-        let search = self.delegate
+        let search = self
+            .delegate
             .map(|delegate| delegate.search_paths(&self.query, 10, self.include_ignored));
 
         if let Some((search, search_updates)) = search {

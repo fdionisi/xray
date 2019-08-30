@@ -4,6 +4,7 @@ const PropTypes = require("prop-types");
 const { styled } = require("styletron-react");
 const TextPlane = require("./text_plane");
 const debounce = require("../debounce");
+const throttle = require("lodash.throttle");
 const $ = React.createElement;
 const { ActionContext, Action } = require("../action_dispatcher");
 
@@ -43,7 +44,7 @@ class TextEditor extends React.Component {
 
   constructor(props) {
     super(props);
-    this.handleMouseMove = this.handleMouseMove.bind(this);
+    this.handleMouseMove = throttle(this.handleMouseMove.bind(this), 16, { trailing: true, leading: true });
     this.handleMouseUp = this.handleMouseUp.bind(this);
     this.handleMouseDown = this.handleMouseDown.bind(this);
     this.handleMouseMove = this.handleMouseMove.bind(this);
@@ -464,7 +465,7 @@ class TextEditor extends React.Component {
         );
       }
 
-      this.props.horizontal_autoscroll = null;
+      // this.props.horizontal_autoscroll = null;
     }
   }
 
